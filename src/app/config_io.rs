@@ -5,6 +5,11 @@ impl App {
     where
         F: FnOnce(&str) -> String,
     {
+        #[cfg(test)]
+        if std::env::var_os(crate::config::CONFIG_PATH_ENV_VAR).is_none() {
+            return false;
+        }
+
         let path = crate::config::config_path();
         if let Some(parent) = path.parent() {
             if let Err(err) = std::fs::create_dir_all(parent) {
@@ -62,6 +67,27 @@ impl App {
             let content =
                 crate::config::upsert_section_value(content, "ui.toast", "delivery", value);
             crate::config::remove_section_key(&content, "ui.toast", "enabled")
+        }) {
+            self.apply_config_from_disk(false);
+        }
+    }
+
+    pub(super) fn save_agent_panel_scope(&mut self, scope: crate::app::state::AgentPanelScope) {
+        let value = match scope {
+            crate::app::state::AgentPanelScope::CurrentWorkspace => {
+                crate::config::AgentPanelScopeConfig::Current.as_str()
+            }
+            crate::app::state::AgentPanelScope::AllWorkspaces => {
+                crate::config::AgentPanelScopeConfig::All.as_str()
+            }
+        };
+        if self.update_config_file("agent panel scope", |content| {
+            crate::config::upsert_section_value(
+                content,
+                "ui",
+                "agent_panel_scope",
+                &format!("\"{value}\""),
+            )
         }) {
             self.apply_config_from_disk(false);
         }

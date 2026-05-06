@@ -148,12 +148,16 @@ impl App {
             }
         }
 
+        let previous_agent_panel_scope = self.state.agent_panel_scope;
         if let Some(action) = self.state.handle_mouse(mouse) {
             match action {
                 SettingsAction::SaveTheme(name) => self.save_theme(&name),
                 SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
                 SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
             }
+        }
+        if self.state.agent_panel_scope != previous_agent_panel_scope {
+            self.save_agent_panel_scope(self.state.agent_panel_scope);
         }
 
         if let Some(content) = self.state.request_clipboard_write.take() {

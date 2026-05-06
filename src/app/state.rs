@@ -398,7 +398,7 @@ pub enum AgentPanelScope {
 
 impl Default for AgentPanelScope {
     fn default() -> Self {
-        Self::CurrentWorkspace
+        Self::AllWorkspaces
     }
 }
 
@@ -815,7 +815,7 @@ impl AppState {
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split: 0.5,
-            agent_panel_scope: AgentPanelScope::CurrentWorkspace,
+            agent_panel_scope: AgentPanelScope::AllWorkspaces,
             confirm_close: true,
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,
             accent: Color::Cyan,

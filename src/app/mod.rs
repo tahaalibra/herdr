@@ -115,6 +115,15 @@ fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
 }
 
+fn agent_panel_scope_from_config(
+    scope: crate::config::AgentPanelScopeConfig,
+) -> state::AgentPanelScope {
+    match scope {
+        crate::config::AgentPanelScopeConfig::Current => state::AgentPanelScope::CurrentWorkspace,
+        crate::config::AgentPanelScopeConfig::All => state::AgentPanelScope::AllWorkspaces,
+    }
+}
+
 /// Resolve the palette from config: base theme + optional custom overrides.
 fn resolve_palette(config: &crate::config::Config) -> state::Palette {
     resolve_palette_with_legacy_accent(config, true)
@@ -174,7 +183,7 @@ impl App {
             workspaces,
             active,
             selected,
-            agent_panel_scope,
+            _restored_agent_panel_scope,
             sidebar_width,
             sidebar_width_source,
             sidebar_section_split,
@@ -242,6 +251,8 @@ impl App {
                 0.5_f32,
             )
         };
+
+        let agent_panel_scope = agent_panel_scope_from_config(config.ui.agent_panel_scope);
 
         info!(
             pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes,
@@ -635,6 +646,9 @@ impl App {
                 self.state.sidebar_width = config.ui.sidebar_width;
             }
             self.state.confirm_close = config.ui.confirm_close;
+            self.state.agent_panel_scope =
+                agent_panel_scope_from_config(config.ui.agent_panel_scope);
+            self.state.agent_panel_scroll = 0;
             self.state.accent = crate::config::parse_color(&config.ui.accent);
             if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
                 self.state.request_client_sound_config_reload = true;
@@ -892,6 +906,27 @@ mod tests {
     }
 
     #[test]
+    fn startup_uses_configured_agent_panel_scope() {
+        let mut config = Config::default();
+        config.ui.agent_panel_scope = crate::config::AgentPanelScopeConfig::Current;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(
+            &config,
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+    }
+
+    #[test]
     fn startup_restores_preview_update_available_from_saved_notes() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("startup-preview-update-available");
@@ -933,7 +968,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[keys]\nnew_workspace = \"g\"\nprefix = \"ctrl+a\"\n[ui.toast]\ndelivery = \"herdr\"\n",
+            "[keys]\nnew_workspace = \"g\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\n[ui.toast]\ndelivery = \"herdr\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -951,6 +986,10 @@ mod tests {
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Herdr
+        );
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
         );
         assert!(app.state.config_diagnostic.is_none());
         let toast = app.state.toast.as_ref().unwrap();
@@ -1090,6 +1129,34 @@ mod tests {
         );
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("delivery = \"terminal\""));
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn save_agent_panel_scope_persists_then_applies_live_config() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("save-agent-panel-scope");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::AllWorkspaces
+        );
+
+        app.save_agent_panel_scope(state::AgentPanelScope::CurrentWorkspace);
+
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("agent_panel_scope = \"current\""));
         assert!(app.state.config_diagnostic.is_none());
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);

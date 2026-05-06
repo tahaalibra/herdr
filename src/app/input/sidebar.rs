@@ -686,10 +686,16 @@ mod tests {
             toggle.y,
         ));
 
-        assert_eq!(app.state.agent_panel_scope, AgentPanelScope::AllWorkspaces);
+        assert_eq!(
+            app.state.agent_panel_scope,
+            AgentPanelScope::CurrentWorkspace
+        );
         assert_eq!(app.state.agent_panel_scroll, 0);
         let snapshot = capture_snapshot(&app.state);
-        assert_eq!(snapshot.agent_panel_scope, AgentPanelScope::AllWorkspaces);
+        assert_eq!(
+            snapshot.agent_panel_scope,
+            AgentPanelScope::CurrentWorkspace
+        );
     }
 
     #[test]

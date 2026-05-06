@@ -109,6 +109,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Ask for confirmation before closing a workspace
 # confirm_close = true
 
+# Agent panel scope: "current" or "all". Toggling it in the sidebar saves this setting.
+# agent_panel_scope = "all"
+
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"

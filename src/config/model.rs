@@ -11,6 +11,23 @@ pub enum ToastDelivery {
     Terminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentPanelScopeConfig {
+    Current,
+    #[default]
+    All,
+}
+
+impl AgentPanelScopeConfig {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::All => "all",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToastConfig {
     pub delivery: ToastDelivery,
@@ -106,6 +123,8 @@ pub struct UiConfig {
     pub sidebar_width: u16,
     /// Ask for confirmation before closing a workspace. Default: true.
     pub confirm_close: bool,
+    /// Agent sidebar scope. Saved values are "current" or "all". Default: "all".
+    pub agent_panel_scope: AgentPanelScopeConfig,
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
@@ -161,6 +180,7 @@ impl Default for UiConfig {
         Self {
             sidebar_width: 26,
             confirm_close: true,
+            agent_panel_scope: AgentPanelScopeConfig::All,
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
@@ -210,6 +230,16 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_panel_scope_config_parses() {
+        let toml = r#"
+[ui]
+agent_panel_scope = "all"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.agent_panel_scope, AgentPanelScopeConfig::All);
+    }
 
     #[test]
     fn toast_config_parses() {

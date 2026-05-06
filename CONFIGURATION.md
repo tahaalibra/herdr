@@ -39,6 +39,7 @@ Reloadable now:
 - keybindings and prefix
 - theme, custom theme colors, and legacy `ui.accent`
 - `ui.confirm_close`
+- `ui.agent_panel_scope`
 - `ui.toast.delivery`
 - server-side `ui.sound` policy; attached thin clients refresh local sound config after a successful sound-policy change
 - `advanced.scrollback_limit_bytes` for panes created after reload
@@ -212,6 +213,7 @@ for `panel_bg`, you can also use `reset`, `default`, `none`, or `transparent` to
 [ui]
 sidebar_width = 26
 confirm_close = true
+agent_panel_scope = "all"
 accent = "cyan"
 ```
 
@@ -221,7 +223,10 @@ accent = "cyan"
 |--------|---------|-------------|
 | `sidebar_width` | `26` | base sidebar width before auto-scaling |
 | `confirm_close` | `true` | ask before closing a workspace |
+| `agent_panel_scope` | `all` | sidebar agent list scope: `current` or `all` |
 | `accent` | `cyan` | highlight and border color |
+
+Changing the agent panel scope from the sidebar writes `agent_panel_scope` to config so it survives session resets and upgrades.
 
 `accent` accepts:
 - named colors like `cyan`, `blue`, `magenta`

@@ -15,7 +15,10 @@ pub use self::{
         format_key_combo, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
         Keybinds, LiveKeybindConfig,
     },
-    model::{Config, ConfigReloadReport, ConfigReloadStatus, ToastConfig, ToastDelivery},
+    model::{
+        AgentPanelScopeConfig, Config, ConfigReloadReport, ConfigReloadStatus, ToastConfig,
+        ToastDelivery,
+    },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},
 };

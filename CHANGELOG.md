@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Agent panel scope now defaults to `all` and is saved to config when changed, so choosing `current` or `all` survives session resets and upgrades.
+
 ## [0.5.5] - 2026-05-06
 
 ### Added
