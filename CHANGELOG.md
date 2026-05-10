@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.7] - 2026-05-10
+
 ### Added
 - Added ANSI-formatted pane reads to the CLI and socket API with `herdr pane read --format ansi` / `--ansi`, preserving colors and styles for visible and recent pane output.
 
