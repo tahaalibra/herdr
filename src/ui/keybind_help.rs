@@ -57,6 +57,10 @@ pub(super) fn keybind_help_groups(
         (kb.rename_workspace_label.clone(), "rename workspace"),
         (kb.close_workspace_label.clone(), "close workspace"),
         (
+            optional_keybind_label(&kb.open_notification_target_label),
+            "open notification target",
+        ),
+        (
             optional_keybind_label(&kb.previous_workspace_label),
             "previous workspace",
         ),

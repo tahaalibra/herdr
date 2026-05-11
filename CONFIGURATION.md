@@ -94,6 +94,7 @@ new_workspace = "n"
 rename_workspace = "shift+n"
 close_workspace = "shift+d"
 reload_config = ""      # optional, unset by default
+open_notification_target = "" # optional, unset by default
 new_tab = "c"
 split_vertical = "v"
 split_horizontal = "-"
@@ -122,6 +123,7 @@ focus_pane_right = "alt+l"
 | `close_workspace` | `shift+d` | close selected workspace |
 | `detach` | unset | optional explicit detach shortcut in the persistent session |
 | `reload_config` | unset | reload `config.toml` in the running app/server |
+| `open_notification_target` | unset | jump to the currently visible notification target |
 | `previous_workspace` | unset | switch to the previous workspace directly from terminal mode |
 | `next_workspace` | unset | switch to the next workspace directly from terminal mode |
 | `new_tab` | `c` | create a new tab |

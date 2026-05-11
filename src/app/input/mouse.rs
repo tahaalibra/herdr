@@ -1009,7 +1009,7 @@ impl AppState {
             && rect_contains(self.view.toast_hit_area, col, row)
     }
 
-    fn focus_toast_target(&mut self) {
+    pub(crate) fn focus_toast_target(&mut self) {
         let Some(target) = self.toast.as_ref().and_then(|toast| toast.target.clone()) else {
             return;
         };

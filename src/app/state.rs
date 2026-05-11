@@ -897,6 +897,8 @@ impl AppState {
                 detach_label: None,
                 reload_config: None,
                 reload_config_label: None,
+                open_notification_target: None,
+                open_notification_target_label: None,
                 previous_workspace: None,
                 previous_workspace_label: None,
                 next_workspace: None,

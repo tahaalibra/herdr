@@ -87,6 +87,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # next_workspace = ""     # optional, unset by default
 # detach = ""             # optional explicit detach shortcut in server/client mode
 # reload_config = ""      # optional shortcut to reload config.toml without restarting
+# open_notification_target = "" # optional shortcut to jump to the visible notification target
 # new_tab = "c"
 # rename_tab = ""         # optional, unset by default
 # previous_tab = ""       # optional, unset by default

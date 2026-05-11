@@ -79,6 +79,8 @@ pub struct KeysConfig {
     pub detach: String,
     /// Reload config.toml in the running app/server. Unset by default.
     pub reload_config: String,
+    /// Focus the currently visible notification target. Unset by default.
+    pub open_notification_target: String,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: String,
     /// Select the next workspace. Unset by default.
@@ -157,6 +159,7 @@ impl Default for KeysConfig {
             close_workspace: "shift+d".into(),
             detach: "".into(),
             reload_config: "".into(),
+            open_notification_target: "".into(),
             previous_workspace: "".into(),
             next_workspace: "".into(),
             new_tab: "c".into(),

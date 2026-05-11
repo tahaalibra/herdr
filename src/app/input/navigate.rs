@@ -380,6 +380,7 @@ pub(crate) enum NavigateAction {
     EnterResizeMode,
     ToggleSidebar,
     ReloadConfig,
+    OpenNotificationTarget,
     Detach,
 }
 
@@ -462,6 +463,12 @@ fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateA
         .is_some_and(|(code, mods)| key_matches(key, code, mods))
     {
         return Some(NavigateAction::ReloadConfig);
+    }
+    if kb
+        .open_notification_target
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::OpenNotificationTarget);
     }
     if kb
         .detach
@@ -552,6 +559,12 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
         NavigateAction::ReloadConfig => {
             state.request_reload_config = true;
             leave_navigate_mode(state);
+        }
+        NavigateAction::OpenNotificationTarget => {
+            state.focus_toast_target();
+            if state.mode == Mode::Navigate {
+                leave_navigate_mode(state);
+            }
         }
         NavigateAction::Detach => {
             state.detach_requested = true;
@@ -649,6 +662,38 @@ mod tests {
         );
 
         assert!(state.request_reload_config);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn custom_open_notification_key_focuses_current_toast_target() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Navigate;
+        state.keybinds.open_notification_target = Some((KeyCode::Char('g'), KeyModifiers::empty()));
+        state.keybinds.open_notification_target_label = Some("g".into());
+        let target_workspace_id = state.workspaces[1].id.clone();
+        let target_pane = state.workspaces[1].tabs[0].root_pane;
+        state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::NeedsAttention,
+            title: "pi needs attention".into(),
+            context: "two".into(),
+            target: Some(crate::app::state::ToastTarget {
+                workspace_id: target_workspace_id,
+                pane_id: target_pane,
+            }),
+        });
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.workspaces[1].focused_pane_id(), Some(target_pane));
+        assert!(state.toast.is_none());
         assert_eq!(state.mode, Mode::Terminal);
     }
 
