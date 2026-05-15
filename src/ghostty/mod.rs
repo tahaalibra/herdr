@@ -148,6 +148,10 @@ pub const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
 const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const APC_MAX_BYTES: usize = 16 * 1024 * 1024;
 const APC_MAX_BYTES_KITTY: usize = 16 * 1024 * 1024;
+// Kitty image fingerprints are used as a display cache key, not a
+// cryptographic identity. Sampling keeps redraws cheap for multi-megabyte
+// images while still distinguishing normal screenshots/photos/diagrams.
+const KITTY_FINGERPRINT_SAMPLE_BYTES: usize = 4096;
 
 static INSTALL_PNG_DECODER: Once = Once::new();
 
@@ -1188,8 +1192,21 @@ fn kitty_image_fingerprint(
     }
 
     let data = unsafe { slice::from_raw_parts(ptr_out, len) };
-    data.hash(&mut hasher);
+    hash_kitty_image_data_sample(&mut hasher, data);
     hasher.finish()
+}
+
+fn hash_kitty_image_data_sample(hasher: &mut impl Hasher, data: &[u8]) {
+    let sample = KITTY_FINGERPRINT_SAMPLE_BYTES;
+    if data.len() <= sample * 3 {
+        data.hash(hasher);
+        return;
+    }
+
+    data[..sample].hash(hasher);
+    let middle_start = (data.len() / 2).saturating_sub(sample / 2);
+    data[middle_start..middle_start + sample].hash(hasher);
+    data[data.len() - sample..].hash(hasher);
 }
 
 fn grid_ref_hyperlink_uri(grid_ref: &ffi::GhosttyGridRef) -> Result<Option<String>, Error> {
@@ -1860,6 +1877,32 @@ mod tests {
             .unwrap();
         }
         out
+    }
+
+    #[test]
+    fn kitty_image_fingerprint_samples_large_payloads() {
+        let mut data = vec![1u8; KITTY_FINGERPRINT_SAMPLE_BYTES * 4];
+        let original =
+            kitty_image_fingerprint(data.as_ptr(), data.len(), 100, 50, KittyImageFormat::Png);
+
+        data[KITTY_FINGERPRINT_SAMPLE_BYTES / 2] = 2;
+        let changed_prefix =
+            kitty_image_fingerprint(data.as_ptr(), data.len(), 100, 50, KittyImageFormat::Png);
+        assert_ne!(original, changed_prefix);
+
+        data[KITTY_FINGERPRINT_SAMPLE_BYTES / 2] = 1;
+        let middle = data.len() / 2;
+        data[middle] = 3;
+        let changed_middle =
+            kitty_image_fingerprint(data.as_ptr(), data.len(), 100, 50, KittyImageFormat::Png);
+        assert_ne!(original, changed_middle);
+
+        data[middle] = 1;
+        let last = data.len() - 1;
+        data[last] = 4;
+        let changed_suffix =
+            kitty_image_fingerprint(data.as_ptr(), data.len(), 100, 50, KittyImageFormat::Png);
+        assert_ne!(original, changed_suffix);
     }
 
     #[test]

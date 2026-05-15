@@ -98,6 +98,7 @@ struct PlacementSignature {
     x_offset: u32,
     y_offset: u32,
     z: i32,
+    scrollback_offset: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +211,7 @@ pub(crate) fn encode_local_pane_graphics(
 fn encode_graphics_update(
     bytes: &mut Vec<u8>,
     placements: &[HostPlacement],
-    _view_changed: bool,
+    view_changed: bool,
     host_images: &mut HashMap<u32, ImageSignature>,
     host_placements: &mut HashMap<(u32, u32), PlacementSignature>,
 ) {
@@ -234,7 +235,8 @@ fn encode_graphics_update(
         let host_id = host_image_id(placement.pane_id, &placement.placement);
         let host_placement_id = host_placement_id(placement.pane_id, &placement.placement);
         let image_signature = image_signature(placement, format_code);
-        let placement_signature = placement_signature(clipped, placement.placement.z);
+        let placement_signature =
+            placement_signature(clipped, placement.placement.z, placement.scrollback_offset);
         let placement_key = (host_id, host_placement_id);
         current_placements.insert(placement_key);
 
@@ -263,8 +265,11 @@ fn encode_graphics_update(
             }
         }
 
+        // A different view can repaint the same cells with text or overlays and
+        // leave the host-side Kitty placement state out of sync with this cache.
+        // Re-emit the placement even when its geometry signature is unchanged.
         match host_placements.get_mut(&placement_key) {
-            Some(existing) if *existing == placement_signature => {}
+            Some(existing) if !view_changed && *existing == placement_signature => {}
             Some(existing) => {
                 encode_display_placement(
                     bytes,
@@ -385,10 +390,10 @@ fn collect_visible_placements(
             }
         };
         for placement in runtime.kitty_image_placements_with_data_filter(|descriptor| {
-            let host_id = host_image_id_raw(info.id, descriptor.image_id);
             let format_code = kitty_format_code(descriptor.format);
-            uploaded_images.get(&host_id).copied()
-                != Some(image_signature_from_descriptor(descriptor, format_code))
+            let signature = image_signature_from_descriptor(descriptor, format_code);
+            let host_id = host_image_id_for_signature(info.id, signature);
+            uploaded_images.get(&host_id).copied() != Some(signature)
         }) {
             let scrollback_offset = runtime
                 .scroll_metrics()
@@ -411,13 +416,23 @@ fn collect_visible_placements(
 }
 
 fn host_image_id(pane_id: PaneId, placement: &KittyImagePlacement) -> u32 {
-    host_image_id_raw(pane_id, placement.image_id)
+    let format_code = kitty_format_code(placement.format);
+    host_image_id_for_signature(
+        pane_id,
+        ImageSignature {
+            image_width: placement.image_width,
+            image_height: placement.image_height,
+            format_code,
+            data_len: placement.data_len,
+            data_fingerprint: placement.data_fingerprint,
+        },
+    )
 }
 
-fn host_image_id_raw(pane_id: PaneId, image_id: u32) -> u32 {
+fn host_image_id_for_signature(pane_id: PaneId, signature: ImageSignature) -> u32 {
     let mut hasher = DefaultHasher::new();
     pane_id.raw().hash(&mut hasher);
-    image_id.hash(&mut hasher);
+    signature.hash(&mut hasher);
     HOST_IMAGE_ID_BASE + ((hasher.finish() as u32) % 900_000)
 }
 
@@ -663,7 +678,11 @@ fn image_signature_from_descriptor(
     }
 }
 
-fn placement_signature(clipped: ClippedPlacement, z: i32) -> PlacementSignature {
+fn placement_signature(
+    clipped: ClippedPlacement,
+    z: i32,
+    scrollback_offset: u32,
+) -> PlacementSignature {
     PlacementSignature {
         x: clipped.x,
         y: clipped.y,
@@ -676,6 +695,7 @@ fn placement_signature(clipped: ClippedPlacement, z: i32) -> PlacementSignature 
         x_offset: clipped.x_offset,
         y_offset: clipped.y_offset,
         z,
+        scrollback_offset,
     }
 }
 
@@ -816,6 +836,55 @@ mod tests {
     }
 
     #[test]
+    fn view_change_redisplays_unchanged_visible_placement() {
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut bytes = Vec::new();
+        let placement = test_placement(0, 0);
+
+        encode_graphics_update(
+            &mut bytes,
+            &[placement],
+            false,
+            &mut images,
+            &mut placements,
+        );
+        assert_eq!(placements.len(), 1);
+
+        bytes.clear();
+        let same = test_placement(0, 0);
+        encode_graphics_update(&mut bytes, &[same], true, &mut images, &mut placements);
+        let redisplay = String::from_utf8_lossy(&bytes);
+        assert!(!redisplay.contains("a=t"));
+        assert!(redisplay.contains("a=p"));
+        assert_eq!(placements.len(), 1);
+    }
+
+    #[test]
+    fn scrollback_offset_change_redisplays_placement() {
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut bytes = Vec::new();
+        let placement = test_placement(0, 0);
+
+        encode_graphics_update(
+            &mut bytes,
+            &[placement],
+            false,
+            &mut images,
+            &mut placements,
+        );
+
+        bytes.clear();
+        let mut scrolled = test_placement(0, 0);
+        scrolled.scrollback_offset = 3;
+        encode_graphics_update(&mut bytes, &[scrolled], false, &mut images, &mut placements);
+        let redisplay = String::from_utf8_lossy(&bytes);
+        assert!(!redisplay.contains("a=t"));
+        assert!(redisplay.contains("a=p"));
+    }
+
+    #[test]
     fn empty_image_data_does_not_mark_image_uploaded() {
         let mut images = HashMap::new();
         let mut placements = HashMap::new();
@@ -834,6 +903,37 @@ mod tests {
         assert!(bytes.is_empty());
         assert!(images.is_empty());
         assert!(placements.is_empty());
+    }
+
+    #[test]
+    fn same_image_signature_reuses_host_upload_across_source_image_ids() {
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut bytes = Vec::new();
+        let first = test_placement(0, 0);
+
+        encode_graphics_update(&mut bytes, &[first], false, &mut images, &mut placements);
+        assert_eq!(images.len(), 1);
+        assert_eq!(placements.len(), 1);
+
+        bytes.clear();
+        let mut same_image_new_source_id = test_placement(0, 0);
+        same_image_new_source_id.placement.image_id = 8;
+        same_image_new_source_id.placement.placement_id = 4;
+        same_image_new_source_id.placement.data.clear();
+        encode_graphics_update(
+            &mut bytes,
+            &[same_image_new_source_id],
+            false,
+            &mut images,
+            &mut placements,
+        );
+
+        let reused = String::from_utf8_lossy(&bytes);
+        assert!(!reused.contains("a=t"));
+        assert!(reused.contains("a=p"));
+        assert_eq!(images.len(), 1);
+        assert_eq!(placements.len(), 1);
     }
 
     #[test]
