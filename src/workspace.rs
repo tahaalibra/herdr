@@ -575,10 +575,13 @@ mod tests {
         let root_pane = ws.tabs[0].root_pane;
         ws.tabs[0]
             .pane_cwds
-            .insert(root_pane, PathBuf::from("/tmp/pion"));
+            .insert(root_pane, PathBuf::from("/herdr-test/pion"));
 
         assert_eq!(ws.display_name(), "pion");
-        assert_eq!(ws.resolved_identity_cwd(), Some(PathBuf::from("/tmp/pion")));
+        assert_eq!(
+            ws.resolved_identity_cwd(),
+            Some(PathBuf::from("/herdr-test/pion"))
+        );
     }
 
     #[test]

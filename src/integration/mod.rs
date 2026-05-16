@@ -13,12 +13,15 @@ pub(crate) const HERDR_PANE_ID_ENV_VAR: &str = "HERDR_PANE_ID";
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 1;
+const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
 const CLAUDE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/herdr-agent-state.sh");
 const CLAUDE_INTEGRATION_VERSION: u32 = 1;
+const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
 const CODEX_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/herdr-agent-state.sh");
 const CODEX_INTEGRATION_VERSION: u32 = 2;
+const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
 const OPENCODE_INTEGRATION_VERSION: u32 = 1;
@@ -997,15 +1000,53 @@ fn make_executable(path: &Path) -> io::Result<()> {
 }
 
 fn pi_extension_dir() -> io::Result<PathBuf> {
-    Ok(home_dir()?.join(".pi/agent/extensions"))
+    Ok(
+        config_dir_from_env_or_home(PI_CODING_AGENT_DIR_ENV_VAR, &[".pi", "agent"])?
+            .join("extensions"),
+    )
 }
 
 fn claude_dir() -> io::Result<PathBuf> {
-    Ok(home_dir()?.join(".claude"))
+    config_dir_from_env_or_home(CLAUDE_CONFIG_DIR_ENV_VAR, &[".claude"])
 }
 
 fn codex_dir() -> io::Result<PathBuf> {
-    Ok(home_dir()?.join(".codex"))
+    config_dir_from_env_or_home(CODEX_HOME_ENV_VAR, &[".codex"])
+}
+
+fn config_dir_from_env_or_home(
+    env_var: &str,
+    home_relative_segments: &[&str],
+) -> io::Result<PathBuf> {
+    if let Some(value) = std::env::var_os(env_var).filter(|value| !value.is_empty()) {
+        return expand_tilde_path(PathBuf::from(value));
+    }
+
+    let mut path = home_dir()?;
+    for segment in home_relative_segments {
+        path.push(segment);
+    }
+    Ok(path)
+}
+
+fn expand_tilde_path(path: PathBuf) -> io::Result<PathBuf> {
+    let Some(raw) = path.to_str() else {
+        return Ok(path);
+    };
+
+    if raw == "~" {
+        return home_dir();
+    }
+
+    if let Some(rest) = raw
+        .strip_prefix("~/")
+        .or_else(|| raw.strip_prefix("~\\"))
+        .or_else(|| raw.strip_prefix('~'))
+    {
+        return Ok(home_dir()?.join(rest));
+    }
+
+    Ok(path)
 }
 
 fn opencode_dir() -> io::Result<PathBuf> {
@@ -1028,7 +1069,14 @@ pub(crate) fn integration_env_lock() -> MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
+    fn clear_integration_path_env() {
+        std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);
+        std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR);
+        std::env::remove_var(CODEX_HOME_ENV_VAR);
+    }
+
     fn unique_base() -> PathBuf {
+        clear_integration_path_env();
         std::env::temp_dir().join(format!(
             "herdr-integration-install-test-{}-{}",
             std::process::id(),
@@ -1055,6 +1103,42 @@ mod tests {
         assert_eq!(content, PI_EXTENSION_ASSET);
 
         std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_pi_uses_pi_coding_agent_dir_env() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let agent_dir = base.join("custom-pi-agent");
+        let ext_dir = agent_dir.join("extensions");
+        fs::create_dir_all(&ext_dir).unwrap();
+        std::env::set_var(PI_CODING_AGENT_DIR_ENV_VAR, &agent_dir);
+
+        let path = install_pi().unwrap();
+
+        assert_eq!(path, ext_dir.join(PI_EXTENSION_INSTALL_NAME));
+
+        clear_integration_path_env();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_pi_expands_tilde_in_pi_coding_agent_dir_env() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let ext_dir = home.join("custom-pi-agent/extensions");
+        fs::create_dir_all(&ext_dir).unwrap();
+        std::env::set_var("HOME", &home);
+        std::env::set_var(PI_CODING_AGENT_DIR_ENV_VAR, "~/custom-pi-agent");
+
+        let path = install_pi().unwrap();
+
+        assert_eq!(path, ext_dir.join(PI_EXTENSION_INSTALL_NAME));
+
+        std::env::remove_var("HOME");
+        clear_integration_path_env();
         let _ = fs::remove_dir_all(base);
     }
 
@@ -1205,6 +1289,26 @@ mod tests {
             .contains(" release"));
 
         std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_claude_uses_claude_config_dir_env() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let claude_dir = base.join("custom-claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        std::env::set_var(CLAUDE_CONFIG_DIR_ENV_VAR, &claude_dir);
+
+        let installed = install_claude().unwrap();
+
+        assert_eq!(installed.settings_path, claude_dir.join("settings.json"));
+        assert_eq!(
+            installed.hook_path,
+            claude_dir.join("hooks").join(CLAUDE_HOOK_INSTALL_NAME)
+        );
+
+        clear_integration_path_env();
         let _ = fs::remove_dir_all(base);
     }
 
@@ -1374,6 +1478,25 @@ mod tests {
         assert!(!config.contains("codex_hooks"));
 
         std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_codex_uses_codex_home_env() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let codex_dir = base.join("custom-codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        fs::write(codex_dir.join("config.toml"), "model = \"gpt-5.4\"\n").unwrap();
+        std::env::set_var(CODEX_HOME_ENV_VAR, &codex_dir);
+
+        let installed = install_codex().unwrap();
+
+        assert_eq!(installed.hook_path, codex_dir.join(CODEX_HOOK_INSTALL_NAME));
+        assert_eq!(installed.hooks_path, codex_dir.join("hooks.json"));
+        assert_eq!(installed.config_path, codex_dir.join("config.toml"));
+
+        clear_integration_path_env();
         let _ = fs::remove_dir_all(base);
     }
 

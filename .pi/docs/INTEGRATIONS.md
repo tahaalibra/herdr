@@ -55,6 +55,14 @@ this writes the bundled pi extension to:
 ~/.pi/agent/extensions/herdr-agent-state.ts
 ```
 
+if `PI_CODING_AGENT_DIR` is set, herdr uses that agent directory instead and writes to:
+
+```text
+$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts
+```
+
+`~` is expanded in `PI_CODING_AGENT_DIR`.
+
 pi is the cleanest integration. it already has an authoritative hook model, so herdr can get direct state reports over the socket api without guessing as much from the terminal.
 
 bundled source: [`src/integration/assets/pi/herdr-agent-state.ts`](./src/integration/assets/pi/herdr-agent-state.ts)
@@ -65,11 +73,7 @@ uninstall:
 herdr integration uninstall pi
 ```
 
-this removes:
-
-```text
-~/.pi/agent/extensions/herdr-agent-state.ts
-```
+this removes the same extension path herdr would install, using `PI_CODING_AGENT_DIR` when it is set.
 
 ## claude code
 
@@ -83,6 +87,8 @@ this:
 
 - writes the hook script to `~/.claude/hooks/herdr-agent-state.sh`
 - updates `~/.claude/settings.json`
+
+if `CLAUDE_CONFIG_DIR` is set, herdr uses that directory instead, for example `$CLAUDE_CONFIG_DIR/hooks/herdr-agent-state.sh` and `$CLAUDE_CONFIG_DIR/settings.json`. `~` is expanded in `CLAUDE_CONFIG_DIR`.
 
 bundled source: [`src/integration/assets/claude/herdr-agent-state.sh`](./src/integration/assets/claude/herdr-agent-state.sh)
 
@@ -109,10 +115,7 @@ uninstall:
 herdr integration uninstall claude
 ```
 
-this:
-
-- removes `~/.claude/hooks/herdr-agent-state.sh`
-- removes herdr-owned hook entries from `~/.claude/settings.json`
+this removes the same hook path and settings entries herdr would install, using `CLAUDE_CONFIG_DIR` when it is set.
 
 ## codex
 
@@ -128,6 +131,8 @@ this:
 - updates `~/.codex/hooks.json`
 - ensures `hooks = true` under `[features]` in `~/.codex/config.toml`
 - migrates the deprecated top-level `[features] codex_hooks = true` setting to `hooks = true`
+
+if `CODEX_HOME` is set, herdr uses that directory instead, for example `$CODEX_HOME/herdr-agent-state.sh`, `$CODEX_HOME/hooks.json`, and `$CODEX_HOME/config.toml`. `~` is expanded in `CODEX_HOME`.
 
 bundled source: [`src/integration/assets/codex/herdr-agent-state.sh`](./src/integration/assets/codex/herdr-agent-state.sh)
 
@@ -153,9 +158,9 @@ herdr integration uninstall codex
 
 this:
 
-- removes `~/.codex/herdr-agent-state.sh`
-- removes herdr-owned hook entries from `~/.codex/hooks.json`
-- intentionally leaves `~/.codex/config.toml` alone
+- removes the same hook path herdr would install, using `CODEX_HOME` when it is set
+- removes herdr-owned hook entries from the matching `hooks.json`
+- intentionally leaves the matching `config.toml` alone
 
 that last point is deliberate: herdr does **not** try to guess whether `hooks = true` is still needed for some other codex hook setup.
 

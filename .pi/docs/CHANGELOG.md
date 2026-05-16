@@ -4,6 +4,7 @@
 
 ### Fixed
 - GitHub Copilot is now correctly detected when its process name is `copilot`.
+- Integration installs now respect `PI_CODING_AGENT_DIR`, `CLAUDE_CONFIG_DIR`, and `CODEX_HOME` when choosing Pi, Claude Code, and Codex config paths.
 - Split pane resize hit areas no longer overlap the first content column or row, making text selection work from the start of right and bottom panes.
 
 ## [0.5.9] - 2026-05-15
