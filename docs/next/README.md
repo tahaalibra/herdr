@@ -102,7 +102,7 @@ ssh you@yourserver
 herdr
 ```
 
-or attach from your local terminal through ssh without opening a shell first. your local herdr acts as a thin client, connects over ssh, starts or attaches to the remote herdr server, and streams the ui back to your terminal. remote attach uses your local keybindings by default; pass `--remote-keybindings server` to use the remote server config instead. pass `--handoff` to opt into live handoff if remote attach needs to replace a supported running remote server.
+or attach from your local terminal through ssh without opening a shell first. your local herdr acts as a thin client, connects over ssh, starts or attaches to the remote herdr server, and streams the ui back to your terminal. remote attach uses your local keybindings by default; pass `--remote-keybindings server` to use the remote server config instead. pass `--handoff` to opt into live handoff if remote attach needs to replace a supported running remote server. Homebrew and Nix clients bootstrap remote hosts from the matching release asset instead of copying the package-manager-managed local binary.
 
 ```bash
 herdr --remote workbox

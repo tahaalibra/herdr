@@ -276,6 +276,18 @@ fn parse_homebrew_formula_stable_version(input: &[u8]) -> Result<Version, String
     })
 }
 
+fn homebrew_update_from_formula_json(
+    input: &[u8],
+    current: &Version,
+) -> Result<Option<Version>, String> {
+    let latest = parse_homebrew_formula_stable_version(input)?;
+    if &latest <= current {
+        return Ok(None);
+    }
+
+    Ok(Some(latest))
+}
+
 fn check_homebrew_latest() -> Result<Option<Version>, String> {
     let current = Version::current();
 
@@ -294,15 +306,10 @@ fn check_homebrew_latest() -> Result<Option<Version>, String> {
         .map_err(|e| format!("curl failed: {e}"))?;
 
     if !output.status.success() {
-        return Ok(None);
+        return Err("failed to fetch Homebrew formula JSON".into());
     }
 
-    let latest = parse_homebrew_formula_stable_version(&output.stdout)?;
-    if latest <= current {
-        return Ok(None);
-    }
-
-    Ok(Some(latest))
+    homebrew_update_from_formula_json(&output.stdout, &current)
 }
 
 // ---------------------------------------------------------------------------
@@ -1425,13 +1432,7 @@ fn is_homebrew_managed_install() -> bool {
         return false;
     };
 
-    if is_homebrew_managed_exe_path(&current_exe) {
-        return true;
-    }
-
-    current_exe
-        .canonicalize()
-        .is_ok_and(|path| is_homebrew_managed_exe_path(&path))
+    is_homebrew_managed_exe_path_following_links(&current_exe)
 }
 
 fn is_nix_managed_install() -> bool {
@@ -1439,12 +1440,29 @@ fn is_nix_managed_install() -> bool {
         return false;
     };
 
-    if is_nix_store_exe_path(&current_exe) {
+    is_nix_store_exe_path_following_links(&current_exe)
+}
+
+pub(crate) fn is_package_manager_managed_exe_path(path: &Path) -> bool {
+    is_homebrew_managed_exe_path_following_links(path)
+        || is_nix_store_exe_path_following_links(path)
+}
+
+fn is_homebrew_managed_exe_path_following_links(path: &Path) -> bool {
+    if is_homebrew_managed_exe_path(path) {
         return true;
     }
 
-    current_exe
-        .canonicalize()
+    path.canonicalize()
+        .is_ok_and(|path| is_homebrew_managed_exe_path(&path))
+}
+
+fn is_nix_store_exe_path_following_links(path: &Path) -> bool {
+    if is_nix_store_exe_path(path) {
+        return true;
+    }
+
+    path.canonicalize()
         .is_ok_and(|path| is_nix_store_exe_path(&path))
 }
 
@@ -1903,13 +1921,19 @@ fn auto_update_homebrew(events: tokio::sync::mpsc::Sender<crate::events::AppEven
 }
 
 fn homebrew_release_notes_body(version: &Version) -> String {
-    if let Ok(manifest) = fetch_update_manifest() {
-        if let Some(metadata) = manifest.metadata_for_version(version) {
-            let notes_body = metadata.notes_body();
-            if !notes_body.is_empty() {
-                handle_manifest_announcement(&version.to_string(), metadata.announcement.as_ref());
-                return notes_body;
-            }
+    let manifest = fetch_update_manifest().ok();
+    homebrew_release_notes_body_from_manifest(version, manifest.as_ref())
+}
+
+fn homebrew_release_notes_body_from_manifest(
+    version: &Version,
+    manifest: Option<&UpdateManifest>,
+) -> String {
+    if let Some(metadata) = manifest.and_then(|manifest| manifest.metadata_for_version(version)) {
+        let notes_body = metadata.notes_body();
+        if !notes_body.is_empty() {
+            handle_manifest_announcement(&version.to_string(), metadata.announcement.as_ref());
+            return notes_body;
         }
     }
 
@@ -2102,10 +2126,34 @@ mod tests {
     }
 
     #[test]
+    fn package_manager_path_detection_follows_homebrew_symlink() {
+        #[cfg(unix)]
+        {
+            let root = std::env::temp_dir().join(format!(
+                "herdr-homebrew-symlink-test-{}",
+                std::process::id()
+            ));
+            let cellar_bin = root.join("Cellar/herdr/0.6.2/bin");
+            let opt_bin = root.join("opt/herdr/bin");
+            fs::create_dir_all(&cellar_bin).unwrap();
+            fs::create_dir_all(&opt_bin).unwrap();
+            let cellar_binary = cellar_bin.join("herdr");
+            let opt_binary = opt_bin.join("herdr");
+            fs::write(&cellar_binary, b"").unwrap();
+            std::os::unix::fs::symlink(&cellar_binary, &opt_binary).unwrap();
+
+            assert!(is_package_manager_managed_exe_path(&opt_binary));
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn nix_store_path_is_detected() {
         let path = Path::new("/nix/store/abc123-herdr-0.6.1/bin/herdr");
 
         assert!(is_nix_store_exe_path(path));
+        assert!(is_package_manager_managed_exe_path(path));
     }
 
     #[test]
@@ -2123,6 +2171,59 @@ mod tests {
         .unwrap();
 
         assert_eq!(version, Version::parse("0.5.10").unwrap());
+    }
+
+    #[test]
+    fn homebrew_formula_update_uses_formula_stable_not_manifest_latest() {
+        let current = Version::parse("0.6.1").unwrap();
+        let update = homebrew_update_from_formula_json(
+            br#"{"versions":{"stable":"0.6.2","head":"HEAD","bottle":true}}"#,
+            &current,
+        )
+        .unwrap();
+
+        assert_eq!(update, Some(Version::parse("0.6.2").unwrap()));
+    }
+
+    #[test]
+    fn homebrew_formula_update_ignores_versions_that_are_not_newer() {
+        let current = Version::parse("0.6.2").unwrap();
+        let update = homebrew_update_from_formula_json(
+            br#"{"versions":{"stable":"0.6.2","head":"HEAD","bottle":true}}"#,
+            &current,
+        )
+        .unwrap();
+
+        assert_eq!(update, None);
+    }
+
+    #[test]
+    fn homebrew_release_notes_use_package_manager_guidance() {
+        let body =
+            homebrew_release_notes_body_from_manifest(&Version::parse("0.6.3").unwrap(), None);
+
+        assert_eq!(body, "### Changed\n- v0.6.3 is available through Homebrew.");
+    }
+
+    #[test]
+    fn homebrew_release_notes_can_use_manifest_metadata() {
+        let manifest: UpdateManifest = serde_json::from_str(
+            r####"{
+                "version": "0.6.3",
+                "protocol": 10,
+                "notes": "### Fixed\n- Brew notes",
+                "assets": {
+                    "linux-x86_64": "https://example.com/herdr-linux-x86_64"
+                }
+            }"####,
+        )
+        .unwrap();
+        let body = homebrew_release_notes_body_from_manifest(
+            &Version::parse("0.6.3").unwrap(),
+            Some(&manifest),
+        );
+
+        assert_eq!(body, "### Fixed\n- Brew notes");
     }
 
     #[test]
@@ -2953,6 +3054,32 @@ mod tests {
                 url.ends_with(&format!("herdr-{target}")),
                 "unexpected asset name for {target}: {url}"
             );
+        }
+
+        for (version, release) in &manifest.releases {
+            let assets = release
+                .get("assets")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("missing assets for release {version}"));
+            for target in [
+                "linux-x86_64",
+                "linux-aarch64",
+                "macos-x86_64",
+                "macos-aarch64",
+            ] {
+                let url = assets
+                    .get(target)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("missing asset URL for {version} {target}"));
+                assert!(
+                    url.contains(&format!("/releases/download/v{version}/")),
+                    "unexpected release URL for {version} {target}: {url}"
+                );
+                assert!(
+                    url.ends_with(&format!("herdr-{target}")),
+                    "unexpected asset name for {version} {target}: {url}"
+                );
+            }
         }
     }
 }
