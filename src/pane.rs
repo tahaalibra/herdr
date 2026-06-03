@@ -113,11 +113,13 @@ async fn publish_state_changed_event(
 
 const AGENT_MISS_CONFIRMATION_ATTEMPTS: u8 = 6;
 const PROCESS_RECHECK_IDENTIFIED: std::time::Duration = std::time::Duration::from_secs(5);
-const PROCESS_RECHECK_UNIDENTIFIED: std::time::Duration = std::time::Duration::from_secs(30);
+const PROCESS_RECHECK_MISSING_FOREGROUND_GROUP: std::time::Duration =
+    std::time::Duration::from_secs(30);
 const PROCESS_ACQUISITION_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
 const PROCESS_ACQUISITION_FAST_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
 const PROCESS_ACQUISITION_FAST_RECHECK: std::time::Duration = std::time::Duration::from_millis(500);
 const PROCESS_ACQUISITION_SLOW_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+const PROCESS_ACQUISITION_IDLE_RESET: std::time::Duration = std::time::Duration::from_secs(2);
 const STABLE_VISIBLE_SIGNAL_REFRESH: std::time::Duration = std::time::Duration::from_millis(800);
 
 #[derive(Debug, Clone, Copy)]
@@ -234,10 +236,53 @@ fn should_probe_foreground_job(input: ProcessProbeInput) -> bool {
     if input.current_agent.is_none() {
         return !input.has_process_probe
             || foreground_group_changed
-            || input.elapsed_since_process_check >= PROCESS_RECHECK_UNIDENTIFIED;
+            || (input.foreground_pgid.is_none()
+                && input.elapsed_since_process_check >= PROCESS_RECHECK_MISSING_FOREGROUND_GROUP);
     }
 
     foreground_group_changed || input.elapsed_since_process_check >= PROCESS_RECHECK_IDENTIFIED
+}
+
+fn sync_content_change_acquisition(
+    current_agent: Option<Agent>,
+    suppressed_agent: Option<Agent>,
+    process_group_changed: bool,
+    content_changed: bool,
+    now: std::time::Instant,
+    acquisition_started_at: &mut Option<std::time::Instant>,
+    last_content_change_at: &mut Option<std::time::Instant>,
+) {
+    if current_agent.is_some() || suppressed_agent.is_some() || process_group_changed {
+        return;
+    }
+
+    if content_changed {
+        let should_start = acquisition_started_at.is_none_or(|started| {
+            now.duration_since(started) > PROCESS_ACQUISITION_WINDOW
+                && last_content_change_at.is_none_or(|last_change| {
+                    now.duration_since(last_change) >= PROCESS_ACQUISITION_IDLE_RESET
+                })
+        });
+        if should_start {
+            *acquisition_started_at = Some(now);
+        }
+        *last_content_change_at = Some(now);
+        return;
+    }
+
+    let Some(acquisition_started) = *acquisition_started_at else {
+        return;
+    };
+    let Some(last_content_change) = *last_content_change_at else {
+        return;
+    };
+
+    if now.duration_since(acquisition_started) > PROCESS_ACQUISITION_WINDOW
+        && now.duration_since(last_content_change) >= PROCESS_ACQUISITION_IDLE_RESET
+    {
+        *acquisition_started_at = None;
+        *last_content_change_at = None;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -372,7 +417,9 @@ fn spawn_basic_detection_task(
         let mut last_foreground_pgid = None;
         let mut has_process_probe = false;
         let mut acquisition_started_at = None;
+        let mut last_content_change_at = None;
         let mut release_was_active = false;
+        let mut last_detection_text = String::new();
 
         loop {
             tokio::select! {
@@ -388,7 +435,9 @@ fn spawn_basic_detection_task(
                     last_foreground_pgid = None;
                     has_process_probe = false;
                     acquisition_started_at = None;
+                    last_content_change_at = None;
                     release_was_active = false;
+                    last_detection_text.clear();
                 }
             }
 
@@ -397,12 +446,15 @@ fn spawn_basic_detection_task(
             if suppressed_agent.is_none() && release_was_active {
                 has_process_probe = false;
                 acquisition_started_at = None;
+                last_content_change_at = None;
             }
             release_was_active = suppressed_agent.is_some();
             let pid = child_pid.load(Ordering::Acquire);
             let mut agent_changed = false;
             let mut agent = agent_presence.current_agent();
             let content = terminal.detection_text();
+            let content_changed = content != last_detection_text;
+            last_detection_text.clone_from(&content);
             if crate::detect::should_skip_state_update(agent, &content) {
                 continue;
             }
@@ -412,6 +464,15 @@ fn spawn_basic_detection_task(
                 .flatten();
             let process_group_changed =
                 foreground_group_changed(foreground_pgid, last_foreground_pgid);
+            sync_content_change_acquisition(
+                agent_presence.current_agent(),
+                suppressed_agent,
+                process_group_changed,
+                content_changed,
+                now,
+                &mut acquisition_started_at,
+                &mut last_content_change_at,
+            );
             let should_check_process = pid > 0
                 && should_probe_foreground_job(ProcessProbeInput {
                     current_agent: agent_presence.current_agent(),
@@ -447,6 +508,7 @@ fn spawn_basic_detection_task(
                 } else {
                     last_foreground_pgid = probe.process_group_id.or(foreground_pgid);
                     acquisition_started_at = None;
+                    last_content_change_at = None;
                 }
                 let previous_agent = agent_presence.current_agent();
                 if agent_presence.observe_process_probe(new_agent) {
@@ -1443,6 +1505,7 @@ impl PaneRuntime {
                 let mut last_foreground_pgid = None;
                 let mut has_process_probe = false;
                 let mut acquisition_started_at = None;
+                let mut last_content_change_at = None;
                 let mut pending_foreground_shell_clear = false;
                 let mut foreground_shell_exit_reported = false;
                 let mut release_was_active = false;
@@ -1452,6 +1515,7 @@ impl PaneRuntime {
                 let mut last_visible_idle = false;
                 let mut last_visible_working = false;
                 let mut last_visible_signal_refresh = None;
+                let mut last_detection_text = String::new();
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1474,6 +1538,7 @@ impl PaneRuntime {
                             last_foreground_pgid = None;
                             has_process_probe = false;
                             acquisition_started_at = None;
+                            last_content_change_at = None;
                             pending_foreground_shell_clear = false;
                             foreground_shell_exit_reported = false;
                             release_was_active = false;
@@ -1483,6 +1548,7 @@ impl PaneRuntime {
                             last_visible_idle = false;
                             last_visible_working = false;
                             last_visible_signal_refresh = None;
+                            last_detection_text.clear();
                         }
                     }
 
@@ -1491,10 +1557,13 @@ impl PaneRuntime {
                     if suppressed_agent.is_none() && release_was_active {
                         has_process_probe = false;
                         acquisition_started_at = None;
+                        last_content_change_at = None;
                     }
                     release_was_active = suppressed_agent.is_some();
                     let pid = child_pid.load(Ordering::Acquire);
                     let content = terminal.detection_text();
+                    let content_changed = content != last_detection_text;
+                    last_detection_text.clone_from(&content);
                     if detect::should_skip_state_update(agent_presence.current_agent(), &content) {
                         continue;
                     }
@@ -1503,6 +1572,15 @@ impl PaneRuntime {
                         .flatten();
                     let process_group_changed =
                         foreground_group_changed(foreground_pgid, last_foreground_pgid);
+                    sync_content_change_acquisition(
+                        agent_presence.current_agent(),
+                        suppressed_agent,
+                        process_group_changed,
+                        content_changed,
+                        now,
+                        &mut acquisition_started_at,
+                        &mut last_content_change_at,
+                    );
                     let should_check_process = pid > 0
                         && should_probe_foreground_job(ProcessProbeInput {
                             current_agent: agent_presence.current_agent(),
@@ -1565,6 +1643,7 @@ impl PaneRuntime {
                             if new_agent.is_some() {
                                 last_foreground_pgid = process_group_id;
                                 acquisition_started_at = None;
+                                last_content_change_at = None;
                                 pending_restore_probe = false;
                             } else if agent_presence.current_agent().is_none() {
                                 last_foreground_pgid = process_group_id.or(foreground_pgid);
@@ -2620,13 +2699,17 @@ mod tests {
     }
 
     #[test]
-    fn unidentified_pane_gets_initial_and_safety_process_probes() {
+    fn unidentified_pane_gets_initial_process_probe() {
         assert!(should_probe_foreground_job(ProcessProbeInput {
             has_process_probe: false,
             ..process_probe_input()
         }));
-        assert!(should_probe_foreground_job(ProcessProbeInput {
-            elapsed_since_process_check: PROCESS_RECHECK_UNIDENTIFIED,
+    }
+
+    #[test]
+    fn stable_unidentified_foreground_group_has_no_safety_process_probe() {
+        assert!(!should_probe_foreground_job(ProcessProbeInput {
+            elapsed_since_process_check: PROCESS_RECHECK_MISSING_FOREGROUND_GROUP,
             ..process_probe_input()
         }));
     }
@@ -2641,7 +2724,7 @@ mod tests {
         assert!(should_probe_foreground_job(ProcessProbeInput {
             foreground_pgid: None,
             last_foreground_pgid: None,
-            elapsed_since_process_check: PROCESS_RECHECK_UNIDENTIFIED,
+            elapsed_since_process_check: PROCESS_RECHECK_MISSING_FOREGROUND_GROUP,
             ..process_probe_input()
         }));
     }
@@ -2735,6 +2818,133 @@ mod tests {
             elapsed_since_process_check: PROCESS_ACQUISITION_SLOW_RECHECK,
             ..process_probe_input()
         }));
+    }
+
+    #[test]
+    fn content_change_starts_bounded_unidentified_acquisition_window() {
+        let now = std::time::Instant::now();
+        let mut acquisition_started_at = None;
+        let mut last_content_change_at = None;
+
+        sync_content_change_acquisition(
+            None,
+            None,
+            false,
+            true,
+            now,
+            &mut acquisition_started_at,
+            &mut last_content_change_at,
+        );
+        assert_eq!(acquisition_started_at, Some(now));
+        assert_eq!(last_content_change_at, Some(now));
+
+        let later = now + std::time::Duration::from_secs(1);
+        sync_content_change_acquisition(
+            None,
+            None,
+            false,
+            true,
+            later,
+            &mut acquisition_started_at,
+            &mut last_content_change_at,
+        );
+        assert_eq!(
+            acquisition_started_at,
+            Some(now),
+            "changed frames should not refresh the acquisition window"
+        );
+        assert_eq!(last_content_change_at, Some(later));
+
+        let quiet_after_window =
+            later + PROCESS_ACQUISITION_WINDOW + PROCESS_ACQUISITION_IDLE_RESET;
+        sync_content_change_acquisition(
+            None,
+            None,
+            false,
+            false,
+            quiet_after_window,
+            &mut acquisition_started_at,
+            &mut last_content_change_at,
+        );
+        assert_eq!(acquisition_started_at, None);
+        assert_eq!(last_content_change_at, None);
+
+        let next_burst = quiet_after_window + std::time::Duration::from_secs(1);
+        sync_content_change_acquisition(
+            None,
+            None,
+            false,
+            true,
+            next_burst,
+            &mut acquisition_started_at,
+            &mut last_content_change_at,
+        );
+        assert_eq!(acquisition_started_at, Some(next_burst));
+        assert_eq!(last_content_change_at, Some(next_burst));
+    }
+
+    #[test]
+    fn content_change_does_not_start_acquisition_when_process_probe_has_other_signal() {
+        let now = std::time::Instant::now();
+        let mut acquisition_started_at = None;
+        let mut last_content_change_at = None;
+
+        sync_content_change_acquisition(
+            Some(Agent::Codex),
+            None,
+            false,
+            true,
+            now,
+            &mut acquisition_started_at,
+            &mut last_content_change_at,
+        );
+        assert_eq!(acquisition_started_at, None);
+        assert_eq!(last_content_change_at, None);
+
+        sync_content_change_acquisition(
+            None,
+            Some(Agent::Codex),
+            false,
+            true,
+            now,
+            &mut acquisition_started_at,
+            &mut last_content_change_at,
+        );
+        assert_eq!(acquisition_started_at, None);
+        assert_eq!(last_content_change_at, None);
+
+        sync_content_change_acquisition(
+            None,
+            None,
+            true,
+            true,
+            now,
+            &mut acquisition_started_at,
+            &mut last_content_change_at,
+        );
+        assert_eq!(acquisition_started_at, None);
+        assert_eq!(last_content_change_at, None);
+    }
+
+    #[test]
+    fn content_change_restarts_stale_process_group_acquisition_window() {
+        let now = std::time::Instant::now();
+        let stale_start = now - PROCESS_ACQUISITION_WINDOW - std::time::Duration::from_millis(1);
+        let mut acquisition_started_at = Some(stale_start);
+        let mut last_content_change_at = None;
+
+        sync_content_change_acquisition(
+            None,
+            None,
+            false,
+            true,
+            now,
+            &mut acquisition_started_at,
+            &mut last_content_change_at,
+        );
+
+        assert_eq!(acquisition_started_at, Some(now));
+        assert_eq!(last_content_change_at, Some(now));
     }
 
     #[test]
