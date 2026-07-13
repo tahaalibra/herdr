@@ -147,6 +147,10 @@ pub(crate) enum SidebarResizeOutcome {
 }
 
 pub(crate) struct ClientCompositor {
+    /// The client-resolved theme palette the composited sidebar renders with.
+    /// Set from the client's local config at bootstrap and on config reload;
+    /// defaults to catppuccin so tests stay config-independent.
+    palette: crate::app::state::Palette,
     sidebar_width: u16,
     workspace_scroll: usize,
     agent_panel_scroll: usize,
@@ -300,6 +304,7 @@ struct ClientSidebarSnapshot {
 impl ClientCompositor {
     pub(crate) fn new(sidebar_width: u16) -> Self {
         Self {
+            palette: crate::app::state::Palette::catppuccin(),
             sidebar_width,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
@@ -321,6 +326,12 @@ impl ClientCompositor {
 
     pub(crate) fn sidebar_width(&self) -> u16 {
         self.sidebar_width
+    }
+
+    /// Apply the client's locally-resolved theme palette (bootstrap + config
+    /// reload). The next `from_model` snapshot renders with it.
+    pub(crate) fn set_palette(&mut self, palette: crate::app::state::Palette) {
+        self.palette = palette;
     }
 
     /// #24: whether the prefix key has been pressed and the next key should be matched against
@@ -1440,6 +1451,10 @@ impl ClientSidebarSnapshot {
         now: Instant,
     ) -> Self {
         let mut app = crate::app::AppState::empty_for_client_rendering();
+        // Render with the CLIENT's configured theme, not the built-in default —
+        // the composited sidebar must match what the server-rendered sidebar
+        // showed for the same config (panel background, bands, accents).
+        app.palette = compositor.palette.clone();
         let settings = model.ui_settings();
         app.sidebar_width = sidebar_width;
         app.default_sidebar_width = settings.sidebar_default_width;
@@ -1483,7 +1498,11 @@ impl ClientSidebarSnapshot {
                 );
                 Mode::GlobalMenu
             }
-            None => Mode::Navigate,
+            // Terminal, not Navigate: during normal use the server-rendered
+            // sidebar marks the active space with the DARK `surface_dim` band
+            // (Navigate's lighter `selected` band only appears while actively
+            // navigating). Projecting Navigate here washed the highlight out.
+            None => Mode::Terminal,
         };
 
         let mut agents_by_workspace = HashMap::<(ServerId, String), Vec<AgentSidebarRow>>::new();
@@ -4232,6 +4251,31 @@ mod tests {
         assert!(snapshot.app.workspaces[remote_idx]
             .focused_pane_id()
             .is_some());
+    }
+
+    #[test]
+    fn snapshot_renders_with_the_client_palette_and_terminal_mode() {
+        // The composited sidebar must match the server-rendered look for the same
+        // config: the CLIENT's resolved theme palette (not the built-in default)
+        // and Terminal mode, whose dark `surface_dim` band marks the active space
+        // during normal use (Navigate's lighter selected band washed it out).
+        let (model, _remote_id) = mixed_supervisor_model();
+        let mut compositor = ClientCompositor::new(26);
+        let themed = crate::app::state::Palette::terminal();
+        compositor.set_palette(themed.clone());
+
+        let snapshot =
+            ClientSidebarSnapshot::from_model(&model, &compositor, 26, 60, 16, Instant::now());
+
+        assert_eq!(snapshot.app.palette, themed);
+        assert_eq!(snapshot.app.mode, Mode::Terminal);
+
+        // The global menu overlay still projects GlobalMenu mode.
+        let mut menu_model = model;
+        menu_model.open_client_global_menu();
+        let snapshot =
+            ClientSidebarSnapshot::from_model(&menu_model, &compositor, 26, 60, 16, Instant::now());
+        assert_eq!(snapshot.app.mode, Mode::GlobalMenu);
     }
 
     #[test]

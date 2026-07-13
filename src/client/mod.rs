@@ -2637,7 +2637,15 @@ fn run_client_with_mode(
         #[cfg(unix)]
         cell_size_px: (cell_width_px, cell_height_px),
         #[cfg(unix)]
-        compositor: use_client_compositor.then(compositor::ClientCompositor::default),
+        compositor: use_client_compositor.then(|| {
+            let mut compositor = compositor::ClientCompositor::default();
+            // The composited sidebar renders client-side: resolve the theme from
+            // the CLIENT's local config so it matches the server-rendered look.
+            if let Ok(loaded) = crate::config::load_live_config() {
+                compositor.set_palette(crate::app::client_palette_from_config(&loaded.config));
+            }
+            compositor
+        }),
         #[cfg(unix)]
         supervisor_model,
     };
@@ -4826,6 +4834,15 @@ async fn run_client_loop(
                         &mut state.draw_host_cursor,
                         &mut state.remote_image_paste_key,
                     );
+                    // The composited sidebar's theme is client-resolved: pick up
+                    // a changed [theme] on the same reload signal.
+                    if let Some(compositor) = state.compositor.as_mut() {
+                        if let Ok(loaded) = crate::config::load_live_config() {
+                            compositor.set_palette(crate::app::client_palette_from_config(
+                                &loaded.config,
+                            ));
+                        }
+                    }
                 }
                 ServerMessage::MouseCapture { enabled } => {
                     if server_id != active_server_id(&state) {

@@ -329,6 +329,18 @@ fn resolve_palette_for_theme_name(
     palette
 }
 
+/// Resolve the palette a client-owned surface (the composited multi-server
+/// sidebar) should render with, from the CLIENT's local config — the same
+/// resolution `App::new` performs server-side. Host light/dark appearance
+/// following is not wired on the client path; auto-switch themes resolve to
+/// their dark variant, matching the server's default before any appearance
+/// report arrives.
+#[cfg(unix)]
+pub(crate) fn client_palette_from_config(config: &crate::config::Config) -> state::Palette {
+    let runtime = theme_runtime_config(config, true);
+    resolve_effective_theme(&runtime, None).0
+}
+
 fn resolve_effective_theme(
     runtime: &state::ThemeRuntimeConfig,
     appearance: Option<crate::terminal_theme::HostAppearance>,
