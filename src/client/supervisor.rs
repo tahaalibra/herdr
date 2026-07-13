@@ -1835,6 +1835,27 @@ impl ClientSupervisorModel {
         route
     }
 
+    /// Optimistically drop a workspace the user just confirmed closing, so the
+    /// row disappears with the confirmation instead of after the close + summary
+    /// round-trips over the (possibly ssh-bridged) API. If the close fails
+    /// server-side, the next summary refresh restores the row.
+    pub(crate) fn apply_closed_workspace(&mut self, server_id: &ServerId, workspace_id: &str) {
+        if let Some(server) = self
+            .servers
+            .iter_mut()
+            .find(|server| &server.id == server_id)
+        {
+            server
+                .summaries
+                .workspaces
+                .retain(|workspace| workspace.workspace_id != workspace_id);
+            server
+                .summaries
+                .agents
+                .retain(|agent| agent.workspace_id != workspace_id);
+        }
+    }
+
     /// Optimistically merge a just-created workspace (from the create
     /// response's `WorkspaceInfo`) into `server_id`'s summaries, so the new
     /// space appears in the sidebar in the same frame instead of after a
@@ -2496,6 +2517,17 @@ pub(crate) fn fetch_server_summary_from_api_target(
         });
     }
 
+    request_server_summary(&mut api).map_err(|_| ConnectionState::Disconnected)
+}
+
+/// Steady-state summary refresh for an already-connected server: two requests
+/// (workspaces + agents) with no protocol ping. The protocol was verified at
+/// connect time; over an ssh bridge every request is a fresh remote exec, so
+/// dropping the redundant ping cuts a third of each refresh's latency.
+pub(crate) fn fetch_connected_server_summary_from_api_target(
+    target: crate::api::client::ConnectionTarget,
+) -> Result<ServerSummary, ConnectionState> {
+    let mut api = crate::api::client::ApiClient::for_target(target);
     request_server_summary(&mut api).map_err(|_| ConnectionState::Disconnected)
 }
 
@@ -3998,6 +4030,89 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn apply_closed_workspace_drops_workspace_and_its_agents() {
+        let mut model = ClientSupervisorModel::new("local");
+        let remote_id = model.add_secondary(crate::remote_registry::RemoteDefinitionSnapshot {
+            id: "remote-x".into(),
+            name: "x".into(),
+            target: crate::remote_registry::RemoteTargetSnapshot::Local {
+                session: Some("x".into()),
+            },
+            session: None,
+            keybindings: crate::remote_registry::RemoteKeybindingsSnapshot::Local,
+            disabled: false,
+        });
+        model
+            .set_summary(
+                &remote_id,
+                ServerSummary {
+                    workspaces: vec![
+                        WorkspaceSummary {
+                            workspace_id: "doomed".into(),
+                            label: "doomed".into(),
+                            focused: true,
+                            ..Default::default()
+                        },
+                        WorkspaceSummary {
+                            workspace_id: "kept".into(),
+                            label: "kept".into(),
+                            ..Default::default()
+                        },
+                    ],
+                    agents: vec![
+                        AgentSummary {
+                            agent_id: "doomed:t1".into(),
+                            workspace_id: "doomed".into(),
+                            label: "claude".into(),
+                            status: "idle".into(),
+                            focused: true,
+                        },
+                        AgentSummary {
+                            agent_id: "kept:t1".into(),
+                            workspace_id: "kept".into(),
+                            label: "grok".into(),
+                            status: "idle".into(),
+                            focused: false,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+
+        model.apply_closed_workspace(&remote_id, "doomed");
+
+        let server = model.server_for_test(&remote_id).expect("remote present");
+        assert!(
+            server
+                .summaries
+                .workspaces
+                .iter()
+                .all(|ws| ws.workspace_id != "doomed"),
+            "closed workspace removed from summaries"
+        );
+        assert!(
+            server
+                .summaries
+                .agents
+                .iter()
+                .all(|agent| agent.workspace_id != "doomed"),
+            "closed workspace's agents removed from summaries"
+        );
+        assert_eq!(server.summaries.workspaces.len(), 1);
+        assert_eq!(server.summaries.agents.len(), 1);
+
+        // Closing an already-absent workspace (double-confirm race) is a no-op.
+        model.apply_closed_workspace(&remote_id, "doomed");
+        let server = model.server_for_test(&remote_id).expect("remote present");
+        assert_eq!(server.summaries.workspaces.len(), 1);
+
+        // Unknown server id: no panic, no change.
+        model.apply_closed_workspace(&ServerId::secondary("missing"), "kept");
+        let server = model.server_for_test(&remote_id).expect("remote present");
+        assert_eq!(server.summaries.workspaces.len(), 1);
     }
 
     #[test]

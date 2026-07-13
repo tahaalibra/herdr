@@ -203,6 +203,11 @@ struct ClientState {
     /// Secondary servers with a summary refresh already running off the UI loop.
     #[cfg(unix)]
     pending_summary_refresh_server_ids: HashSet<supervisor::ServerId>,
+    /// Servers whose change event arrived WHILE a summary fetch was already in
+    /// flight. The in-flight fetch may have read pre-change state, so a rerun
+    /// fires as soon as it completes instead of waiting for the next poll tick.
+    #[cfg(unix)]
+    queued_summary_refresh_server_ids: HashSet<supervisor::ServerId>,
     /// Secondary servers with a client-stream connection attempt running off the UI loop.
     #[cfg(unix)]
     pending_secondary_connect_server_ids: HashSet<supervisor::ServerId>,
@@ -887,7 +892,8 @@ fn dispatch_client_overlay_input(
             crate::raw_input::RawInputEvent::Key(key)
                 if model.confirm_close_workspace().is_some() =>
             {
-                dispatch_for_confirm_close_outcome(model.handle_confirm_close_workspace_key(key))
+                let outcome = model.handle_confirm_close_workspace_key(key);
+                dispatch_for_confirm_close_outcome(model, outcome)
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
                 dispatch_composited_mouse_input(data.clone(), compositor, model, host_size, &mouse)
@@ -1424,7 +1430,8 @@ fn dispatch_sidebar_hit_target(
             ClientInputDispatch::Redraw
         }
         compositor::SidebarHitTarget::ConfirmCloseWorkspaceConfirm => {
-            dispatch_for_confirm_close_outcome(model.accept_confirm_close_workspace())
+            let outcome = model.accept_confirm_close_workspace();
+            dispatch_for_confirm_close_outcome(model, outcome)
         }
         compositor::SidebarHitTarget::ConfirmCloseWorkspaceCancel => {
             model.close_client_overlay();
@@ -1474,6 +1481,7 @@ fn dispatch_for_rename_workspace_outcome(
 /// next summary; `Redraw` just repaints.
 #[cfg(unix)]
 fn dispatch_for_confirm_close_outcome(
+    model: &mut supervisor::ClientSupervisorModel,
     outcome: supervisor::ConfirmCloseOutcome,
 ) -> ClientInputDispatch {
     match outcome {
@@ -1481,16 +1489,22 @@ fn dispatch_for_confirm_close_outcome(
         supervisor::ConfirmCloseOutcome::Confirm {
             server_id,
             workspace_id,
-        } => ClientInputDispatch::ApiRequest {
-            server_id,
-            refresh: ClientApiRefreshPolicy::Immediate,
-            request: Box::new(crate::api::schema::Request {
-                id: "client:workspace-close".into(),
-                method: crate::api::schema::Method::WorkspaceClose(
-                    crate::api::schema::WorkspaceTarget { workspace_id },
-                ),
-            }),
-        },
+        } => {
+            // Optimistic removal: drop the row with the confirmation instead of
+            // after the close + refresh round-trips; a failed close is restored
+            // by the follow-up summary refresh.
+            model.apply_closed_workspace(&server_id, &workspace_id);
+            ClientInputDispatch::ApiRequest {
+                server_id,
+                refresh: ClientApiRefreshPolicy::Immediate,
+                request: Box::new(crate::api::schema::Request {
+                    id: "client:workspace-close".into(),
+                    method: crate::api::schema::Method::WorkspaceClose(
+                        crate::api::schema::WorkspaceTarget { workspace_id },
+                    ),
+                }),
+            }
+        }
     }
 }
 
@@ -3670,6 +3684,7 @@ fn start_single_secondary_summary_refresh(
     server_id: &supervisor::ServerId,
     ssh_bridges: &HashMap<supervisor::ServerId, crate::remote::RemoteBridge>,
     pending: &mut HashSet<supervisor::ServerId>,
+    queued: &mut HashSet<supervisor::ServerId>,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) {
     // Main-server id: no SSH fetch. The caller performs the local `&mut`
@@ -3678,7 +3693,11 @@ fn start_single_secondary_summary_refresh(
         return;
     }
     // Dedupe: a refresh for this server is already running off the UI loop.
+    // Queue a rerun instead of dropping the signal — the in-flight fetch may
+    // have read pre-change state, and silently dropping pushed the update to
+    // the next poll tick (a visible sidebar lag on create/close).
     if pending.contains(server_id) {
+        queued.insert(server_id.clone());
         return;
     }
     let Some(target) = model.server_connection_target(server_id) else {
@@ -3694,7 +3713,9 @@ fn start_single_secondary_summary_refresh(
     let event_tx = event_tx.clone();
     std::thread::spawn(move || {
         let started_at = Instant::now();
-        let result = supervisor::fetch_server_summary_from_api_target(api_target);
+        // Ping-free: the targeted refresh only runs for connected servers, and
+        // over an ssh bridge each request is a fresh remote exec.
+        let result = supervisor::fetch_connected_server_summary_from_api_target(api_target);
         let elapsed = started_at.elapsed();
         let _ = event_tx.blocking_send(ClientLoopEvent::SupervisorSummaryFetched {
             server_id,
@@ -3873,6 +3894,7 @@ fn teardown_secondary_connection(
     state.frame_cache.remove(server_id);
     state.summary_subscription_server_ids.remove(server_id);
     state.pending_summary_refresh_server_ids.remove(server_id);
+    state.queued_summary_refresh_server_ids.remove(server_id);
     state.pending_secondary_connect_server_ids.remove(server_id);
     state.ssh_bridges.remove(server_id);
     state.secondary_retries.remove(server_id);
@@ -4240,6 +4262,8 @@ async fn run_client_loop(
         summary_subscription_server_ids: HashSet::new(),
         #[cfg(unix)]
         pending_summary_refresh_server_ids: HashSet::new(),
+        #[cfg(unix)]
+        queued_summary_refresh_server_ids: HashSet::new(),
         #[cfg(unix)]
         pending_secondary_connect_server_ids: HashSet::new(),
         #[cfg(unix)]
@@ -4985,6 +5009,7 @@ async fn run_client_loop(
                             &server_id,
                             &state.ssh_bridges,
                             &mut state.pending_summary_refresh_server_ids,
+                            &mut state.queued_summary_refresh_server_ids,
                             &event_tx,
                         );
                     }
@@ -5014,6 +5039,21 @@ async fn run_client_loop(
                 elapsed,
             } => {
                 state.pending_summary_refresh_server_ids.remove(&server_id);
+                // A change event arrived while this fetch was in flight: the fetch
+                // may have read pre-change state, so rerun immediately instead of
+                // waiting for the next poll tick.
+                if state.queued_summary_refresh_server_ids.remove(&server_id) {
+                    if let Some(model) = &state.supervisor_model {
+                        start_single_secondary_summary_refresh(
+                            model,
+                            &server_id,
+                            &state.ssh_bridges,
+                            &mut state.pending_summary_refresh_server_ids,
+                            &mut state.queued_summary_refresh_server_ids,
+                            &event_tx,
+                        );
+                    }
+                }
                 // item 6 (Area 6): track the last successful poll for both the fast (active) and
                 // slow (background) cadence classes so `due_secondary_summary_refreshes` measures
                 // from the latest completion too (not only from the start recorded by the Timer).
@@ -5129,6 +5169,7 @@ async fn run_client_loop(
                                         &server_id,
                                         &state.ssh_bridges,
                                         &mut state.pending_summary_refresh_server_ids,
+                                        &mut state.queued_summary_refresh_server_ids,
                                         &event_tx,
                                     );
                                 }
@@ -5226,6 +5267,7 @@ async fn run_client_loop(
                                 &server_id,
                                 &state.ssh_bridges,
                                 &mut state.pending_summary_refresh_server_ids,
+                                &mut state.queued_summary_refresh_server_ids,
                                 &event_tx,
                             );
                             state.last_summary_refresh.insert(server_id.clone(), now);
@@ -5320,6 +5362,7 @@ async fn run_client_loop(
                                         &server_id,
                                         &state.ssh_bridges,
                                         &mut state.pending_summary_refresh_server_ids,
+                                        &mut state.queued_summary_refresh_server_ids,
                                         &event_tx,
                                     );
                                     state.last_summary_refresh.insert(server_id.clone(), now);
@@ -5463,6 +5506,7 @@ async fn run_client_loop(
                                     server_id,
                                     &state.ssh_bridges,
                                     &mut state.pending_summary_refresh_server_ids,
+                                    &mut state.queued_summary_refresh_server_ids,
                                     &event_tx,
                                 );
                                 state.last_summary_refresh.insert(server_id.clone(), now);
@@ -7191,6 +7235,7 @@ mod tests {
                 last_ping_at: Instant::now(),
                 summary_subscription_server_ids: HashSet::new(),
                 pending_summary_refresh_server_ids: HashSet::new(),
+                queued_summary_refresh_server_ids: HashSet::new(),
                 pending_secondary_connect_server_ids: HashSet::new(),
                 pending_add_remote: false,
                 ssh_bridges: HashMap::new(),
@@ -8451,6 +8496,7 @@ mod tests {
             let ssh_bridges = HashMap::new();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
             let mut pending = HashSet::new();
+            let mut queued = HashSet::new();
             pending.insert(remote_id.clone());
 
             start_single_secondary_summary_refresh(
@@ -8458,12 +8504,15 @@ mod tests {
                 &remote_id,
                 &ssh_bridges,
                 &mut pending,
+                &mut queued,
                 &event_tx,
             );
 
-            // Already pending: no second worker spawned, pending unchanged, nothing queued.
+            // Already pending: no second worker spawned, pending unchanged — but the
+            // signal is QUEUED for a rerun when the in-flight fetch completes.
             assert_eq!(pending.len(), 1);
             assert!(pending.contains(&remote_id));
+            assert!(queued.contains(&remote_id));
             assert!(event_rx.try_recv().is_err());
         }
 
@@ -8473,12 +8522,14 @@ mod tests {
             let ssh_bridges = HashMap::new();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
             let mut pending = HashSet::new();
+            let mut queued = HashSet::new();
 
             start_single_secondary_summary_refresh(
                 &model,
                 &supervisor::ServerId::main(),
                 &ssh_bridges,
                 &mut pending,
+                &mut queued,
                 &event_tx,
             );
 
@@ -8495,12 +8546,14 @@ mod tests {
             let ssh_bridges = HashMap::new();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
             let mut pending = HashSet::new();
+            let mut queued = HashSet::new();
 
             start_single_secondary_summary_refresh(
                 &model,
                 &id_b,
                 &ssh_bridges,
                 &mut pending,
+                &mut queued,
                 &event_tx,
             );
 
@@ -8589,6 +8642,7 @@ mod tests {
                         server_id,
                         &ssh_bridges,
                         &mut state.pending_summary_refresh_server_ids,
+                        &mut state.queued_summary_refresh_server_ids,
                         &event_tx,
                     );
                     state.last_summary_refresh.insert(server_id.clone(), now);
@@ -8623,6 +8677,7 @@ mod tests {
             let ssh_bridges = HashMap::new();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
             let mut pending = HashSet::new();
+            let mut queued = HashSet::new();
 
             // Mirror the handler's secondary branch exactly.
             start_single_secondary_summary_refresh(
@@ -8630,6 +8685,7 @@ mod tests {
                 &changed,
                 &ssh_bridges,
                 &mut pending,
+                &mut queued,
                 &event_tx,
             );
 
@@ -8658,6 +8714,7 @@ mod tests {
             let ssh_bridges = HashMap::new();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
             let mut pending = HashSet::new();
+            let mut queued = HashSet::new();
 
             // Mirror the connect handler's prioritized single-server fetch.
             start_single_secondary_summary_refresh(
@@ -8665,6 +8722,7 @@ mod tests {
                 &connected,
                 &ssh_bridges,
                 &mut pending,
+                &mut queued,
                 &event_tx,
             );
 
