@@ -16,8 +16,7 @@ use serde_json::Value;
 use support::{
     cleanup_test_base, client_handshake, decode_varint_u32, encode_varint_u32, frame_message,
     read_server_message, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid, wait_for_message_variant, wait_for_socket, wait_until,
-    CURRENT_PROTOCOL,
+    unregister_spawned_herdr_pid, wait_for_socket, wait_until, CURRENT_PROTOCOL,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -506,7 +505,6 @@ fn client_sees_headless_startup_config_diagnostic() {
                     break;
                 }
             }
-            Ok(_) => {}
             Err(_) => break,
         }
     }

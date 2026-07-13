@@ -192,6 +192,18 @@ fn request_round_trips_for_server_ui_settings() {
 }
 
 #[test]
+fn ui_settings_section_split_clamps_per_mille() {
+    let mut settings = UiSettingsInfo::default();
+    assert_eq!(settings.sidebar_section_split(), 0.5);
+
+    settings.sidebar_section_split_per_mille = 0;
+    assert_eq!(settings.sidebar_section_split(), 0.1);
+
+    settings.sidebar_section_split_per_mille = 1000;
+    assert_eq!(settings.sidebar_section_split(), 0.9);
+}
+
+#[test]
 fn subscribe_request_parses_all_agent_status_subscription() {
     let json = r#"
     {

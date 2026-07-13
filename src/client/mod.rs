@@ -13,6 +13,7 @@
 //! - Displays sound/toast notifications forwarded from server
 
 mod input;
+mod supervisor;
 
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write as _};

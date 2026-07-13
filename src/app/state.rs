@@ -92,7 +92,39 @@ pub struct Palette {
     pub peach: Color,
 }
 
+/// Linearly blend two colors channel-wise at ratio `t`. Returns a faint mix used
+/// for the subtle hover surface. Only `Color::Rgb` pairs can blend; if either input is a
+/// non-`Rgb` color (e.g. the 16-color `terminal()` palette), fall back to `b` (the
+/// stronger/`surface_dim` side) so the result stays a safe, never-bold background.
+// Consumed by the client-rendered sidebar hover path once the compositor
+// wiring lands; until then only tests exercise the blend.
+#[cfg_attr(not(test), allow(dead_code))]
+fn blend_color(a: Color, b: Color, t: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let mix = |from: u8, to: u8| {
+                let from = from as f32;
+                let to = to as f32;
+                (from + (to - from) * t).round().clamp(0.0, 255.0) as u8
+            };
+            Color::Rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
+        }
+        _ => b,
+    }
+}
+
 impl Palette {
+    /// Subtle hover background for sidebar rows/affordances. A faint lift between the
+    /// page background and the selection surface, so hover reads strictly weaker than
+    /// selected(`surface0`)/active(`surface_dim`)/drag(`surface1`). Theme-derived (no per-theme
+    /// table); non-`Rgb` palettes fall back to `surface_dim` (never bold). Hover NEVER bolds.
+    // Consumed by the client-rendered sidebar hover path once the compositor
+    // wiring lands.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn hover_bg(&self) -> Color {
+        blend_color(self.panel_bg, self.surface_dim, 0.5)
+    }
+
     /// Catppuccin Mocha — the default.
     pub fn catppuccin() -> Self {
         Self {
@@ -574,6 +606,59 @@ pub struct WorkspaceCardArea {
     pub ws_idx: usize,
     pub rect: Rect,
     pub indented: bool,
+}
+
+/// One per host banner entry in a multi-server workspace list. Empty in monolithic mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBannerSpec {
+    pub display_name: String,
+    pub connection_state: HostBannerState,
+    pub space_count: usize,
+    /// Rolling average round-trip latency to this host in ms, if measured.
+    pub latency_ms: Option<u32>,
+    /// Recent downstream frame throughput from this host in bytes/sec, if measured.
+    pub download_bps: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostBannerState {
+    Connected,
+    Connecting,
+    Disconnected,
+    ProtocolMismatch,
+    Disabled,
+}
+
+/// Sidebar hover target. The agent variant is route-index keyed for the
+/// client path (route_idx survives recompose; pane_id does not) and pane_id keyed
+/// for the monolithic path (terminals are stable there).
+// Constructed by sidebar hover hit-testing once the compositor wiring lands;
+// the shared shape exists first so state, input, and render land in slices.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarHoverTarget {
+    Workspace {
+        ws_idx: usize,
+    },
+    AgentMono {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+    },
+    AgentRoute {
+        route_idx: usize,
+    },
+    New,
+    Menu,
+    ScopeToggle,
+    Filter,
+    NewWorkspaceDestination {
+        row: u16,
+    },
+    HostBanner {
+        banner_idx: usize,
+    },
+    Divider,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1450,6 +1535,26 @@ pub struct AppState {
     pub keybinds: Keybinds,
     /// Frame counter for spinner animations (wraps around).
     pub spinner_tick: u32,
+    /// Per-workspace local/remote flag, index-aligned with `workspaces`; empty in monolithic.
+    // These staged multi-server fields are read once the compositor wiring
+    // lands; the shared shapes exist first so state, input, and render land
+    // in slices.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) client_workspace_remote: Vec<bool>,
+    /// One per host banner entry; empty in monolithic.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub host_banners: Vec<HostBannerSpec>,
+    /// Index-aligned with `host_banners`; each value is the `ws_idx` of the remote
+    /// host group's first workspace, i.e. the workspace the banner is emitted immediately
+    /// before. Empty in monolithic.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) host_banner_rows: Vec<usize>,
+    /// Divider labeled/plain coordination flag; false in monolithic.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) host_banner_active: bool,
+    /// Current sidebar hover target.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) sidebar_hover: Option<SidebarHoverTarget>,
     /// UI color palette — all sidebar/UI colors centralized for theming.
     pub palette: Palette,
     /// Currently applied theme name (for settings UI).
@@ -1496,6 +1601,15 @@ impl AppState {
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
         self.pane_id_aliases.remove(&pane_id.raw());
+    }
+
+    /// Update the sidebar hover target, returning whether it changed.
+    // Called from mouse-move handling once the compositor wiring lands.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn set_sidebar_hover(&mut self, next: Option<SidebarHoverTarget>) -> bool {
+        let changed = self.sidebar_hover != next;
+        self.sidebar_hover = next;
+        changed
     }
 
     pub fn sound_enabled(&self) -> bool {
@@ -1805,6 +1919,11 @@ impl AppState {
             toast_config: ToastConfig::default(),
             keybinds: Keybinds::default(),
             spinner_tick: 0,
+            client_workspace_remote: Vec::new(),
+            host_banners: Vec::new(),
+            host_banner_rows: Vec::new(),
+            host_banner_active: false,
+            sidebar_hover: None,
             palette: Palette::catppuccin(),
             theme_name: "catppuccin".to_string(),
             theme_runtime: ThemeRuntimeConfig {
@@ -2212,6 +2331,119 @@ mod tests {
         state.ensure_test_terminals();
 
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn client_workspace_remote_is_empty_in_monolithic() {
+        let app = AppState::test_new();
+        assert!(app.client_workspace_remote.is_empty());
+        assert!(app.host_banners.is_empty());
+        assert!(app.host_banner_rows.is_empty());
+        assert!(!app.host_banner_active);
+        assert_eq!(
+            app.sidebar_host,
+            crate::config::SidebarHostConfig::default()
+        );
+        assert!(app.sidebar_hover.is_none());
+    }
+
+    #[test]
+    fn set_sidebar_hover_reports_changes() {
+        let mut app = AppState::test_new();
+        // Each shared hover variant must be constructible.
+        let targets = [
+            SidebarHoverTarget::Workspace { ws_idx: 0 },
+            SidebarHoverTarget::AgentMono {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::alloc(),
+            },
+            SidebarHoverTarget::AgentRoute { route_idx: 0 },
+            SidebarHoverTarget::New,
+            SidebarHoverTarget::Menu,
+            SidebarHoverTarget::ScopeToggle,
+            SidebarHoverTarget::Filter,
+            SidebarHoverTarget::NewWorkspaceDestination { row: 0 },
+            SidebarHoverTarget::HostBanner { banner_idx: 0 },
+            SidebarHoverTarget::Divider,
+        ];
+        assert!(app.set_sidebar_hover(Some(targets[0])));
+        assert!(!app.set_sidebar_hover(Some(targets[0])));
+        assert!(app.set_sidebar_hover(None));
+    }
+
+    #[test]
+    fn palette_hover_bg_is_between_panel_bg_and_surface_dim() {
+        // Mocha (Rgb) blends to the channel-wise midpoint of panel_bg and surface_dim, and is
+        // distinct from both endpoints so hover reads weaker than selection but visible.
+        let mocha = Palette::catppuccin();
+        let (Color::Rgb(pr, pg, pb), Color::Rgb(sr, sg, sb)) = (mocha.panel_bg, mocha.surface_dim)
+        else {
+            panic!("mocha panel_bg/surface_dim should be Rgb");
+        };
+        let mid = |a: u8, b: u8| ((a as f32 + (b as f32 - a as f32) * 0.5).round()) as u8;
+        assert_eq!(
+            mocha.hover_bg(),
+            Color::Rgb(mid(pr, sr), mid(pg, sg), mid(pb, sb))
+        );
+        assert_ne!(mocha.hover_bg(), mocha.surface_dim);
+        assert_ne!(mocha.hover_bg(), mocha.panel_bg);
+
+        // The 16-color terminal() palette can't blend (non-Rgb), so hover_bg falls back to the
+        // surface_dim side: a safe, never-bold background (no panic).
+        let term = Palette::terminal();
+        assert_eq!(term.hover_bg(), term.surface_dim);
+    }
+
+    #[test]
+    fn blend_color_falls_back_to_b_for_non_rgb() {
+        // Non-Rgb on either side returns `b` unchanged.
+        assert_eq!(
+            blend_color(Color::Reset, Color::DarkGray, 0.5),
+            Color::DarkGray
+        );
+        assert_eq!(
+            blend_color(Color::Rgb(0, 0, 0), Color::Green, 0.5),
+            Color::Green
+        );
+        // Rgb pair blends channel-wise.
+        assert_eq!(
+            blend_color(Color::Rgb(0, 0, 0), Color::Rgb(10, 20, 30), 0.5),
+            Color::Rgb(5, 10, 15)
+        );
+    }
+
+    #[test]
+    fn host_banner_spec_shape_exists() {
+        let spec = HostBannerSpec {
+            display_name: "prod".into(),
+            connection_state: HostBannerState::Connected,
+            space_count: 2,
+            latency_ms: None,
+            download_bps: None,
+        };
+        assert_eq!(spec.display_name, "prod");
+        assert_eq!(spec.space_count, 2);
+        // every connection-state variant exists (server state maps onto these).
+        for state in [
+            HostBannerState::Connected,
+            HostBannerState::Connecting,
+            HostBannerState::Disconnected,
+            HostBannerState::ProtocolMismatch,
+            HostBannerState::Disabled,
+        ] {
+            assert_eq!(
+                HostBannerSpec {
+                    display_name: spec.display_name.clone(),
+                    connection_state: state,
+                    space_count: spec.space_count,
+                    latency_ms: None,
+                    download_bps: None,
+                }
+                .connection_state,
+                state
+            );
+        }
     }
 
     #[test]

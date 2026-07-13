@@ -316,6 +316,9 @@ pub enum HostBannerGradient {
     Muted,
 }
 
+// The cycle/name helpers feed the settings UI once the multi-server
+// client wiring lands; until then only tests exercise them.
+#[cfg_attr(not(test), allow(dead_code))]
 impl HostBannerGradient {
     pub fn next(self) -> Self {
         match self {
@@ -345,6 +348,9 @@ pub enum HostBannerAnimation {
     Static,
 }
 
+// The cycle/name helpers feed the settings UI once the multi-server
+// client wiring lands; until then only tests exercise them.
+#[cfg_attr(not(test), allow(dead_code))]
 impl HostBannerAnimation {
     pub fn next(self) -> Self {
         match self {
@@ -369,6 +375,9 @@ pub enum HostBannerSpeed {
     Lively,
 }
 
+// The cycle/name helpers feed the settings UI once the multi-server
+// client wiring lands; until then only tests exercise them.
+#[cfg_attr(not(test), allow(dead_code))]
 impl HostBannerSpeed {
     pub fn next(self) -> Self {
         match self {
@@ -403,6 +412,9 @@ pub enum HostBannerGlyph {
     None,
 }
 
+// The cycle/name helpers feed the settings UI once the multi-server
+// client wiring lands; until then only tests exercise them.
+#[cfg_attr(not(test), allow(dead_code))]
 impl HostBannerGlyph {
     pub fn next(self) -> Self {
         match self {
@@ -671,5 +683,64 @@ glyph = "right"
 "#;
         let config: crate::config::Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.sidebar.host, SidebarHostConfig::default());
+    }
+
+    #[test]
+    fn host_banner_enum_cycles_round_trip_through_toml_names() {
+        // `next()` walks every variant exactly once before wrapping, and each
+        // `as_str()` name deserializes back to the same variant, so the settings
+        // UI cycle stays in lockstep with the config parser.
+        fn assert_cycle<T: Copy + PartialEq + std::fmt::Debug>(
+            start: T,
+            next: impl Fn(T) -> T,
+            as_str: impl Fn(T) -> &'static str,
+            parse: impl Fn(&str) -> T,
+            expected_len: usize,
+        ) {
+            let mut seen = Vec::new();
+            let mut current = start;
+            loop {
+                assert_eq!(parse(as_str(current)), current);
+                seen.push(current);
+                current = next(current);
+                if current == start {
+                    break;
+                }
+            }
+            assert_eq!(seen.len(), expected_len);
+        }
+
+        assert_cycle(
+            HostBannerGradient::Rainbow,
+            HostBannerGradient::next,
+            HostBannerGradient::as_str,
+            |name| parse_host_gradient(Some(name)),
+            5,
+        );
+        assert_cycle(
+            HostBannerAnimation::Animated,
+            HostBannerAnimation::next,
+            HostBannerAnimation::as_str,
+            |name| parse_host_animation(Some(name)),
+            2,
+        );
+        assert_cycle(
+            HostBannerSpeed::Calm,
+            HostBannerSpeed::next,
+            HostBannerSpeed::as_str,
+            |name| parse_host_speed(Some(name)),
+            3,
+        );
+        assert_cycle(
+            HostBannerGlyph::Left,
+            HostBannerGlyph::next,
+            HostBannerGlyph::as_str,
+            |name| parse_host_glyph(Some(name)),
+            2,
+        );
+
+        // Animation speed drift is strictly increasing with liveliness.
+        assert!(HostBannerSpeed::Calm.drift() < HostBannerSpeed::Normal.drift());
+        assert!(HostBannerSpeed::Normal.drift() < HostBannerSpeed::Lively.drift());
     }
 }

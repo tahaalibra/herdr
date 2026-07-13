@@ -575,6 +575,9 @@ impl FrameData {
     /// A blank frame of `width`×`height` reset/space cells. Used as an instant placeholder when
     /// switching to a server whose content has not been received yet, so the UI repaints the new
     /// shell immediately instead of holding the previous server's screen.
+    // Used by the multi-server client to repaint instantly on server switch;
+    // until that wiring lands only tests construct blank frames.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn blank(width: u16, height: u16) -> Self {
         let count = (width as usize) * (height as usize);
         FrameData {

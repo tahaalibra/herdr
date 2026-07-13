@@ -586,3 +586,24 @@ fn focused_terminal_suppresses_host_cursor(
         .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
         .is_some_and(crate::terminal::TerminalRuntime::synchronized_output_active)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_content_render_covers_full_area_without_sidebar() {
+        let mut app = AppState::test_new();
+        let area = Rect::new(0, 0, 40, 12);
+
+        let (buffer, _cursor) = render_embedded_content_virtual(&mut app, area, false);
+
+        assert_eq!(buffer.area.width, 40);
+        assert_eq!(buffer.area.height, 12);
+        // The embedded surface owns the whole area: no sidebar column is
+        // reserved and the terminal content area spans the full width.
+        assert_eq!(app.view.sidebar_rect, Rect::default());
+        assert_eq!(app.view.terminal_area.width, 40);
+        assert!(app.view.workspace_card_areas.is_empty());
+    }
+}
