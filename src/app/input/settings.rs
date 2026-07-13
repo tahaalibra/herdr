@@ -109,8 +109,8 @@ fn toast_delivery_for_index(idx: usize) -> ToastDelivery {
 }
 
 /// The sidebar-host section exposes a fixed option list (gradient/animation/speed/glyph/
-/// show_count). It does NOT use a rows/lines model.
-const SIDEBAR_HOST_OPTION_COUNT: usize = 5;
+/// show_count/show_metrics). It does NOT use a rows/lines model.
+const SIDEBAR_HOST_OPTION_COUNT: usize = 6;
 
 /// Cycle the focused `[ui.sidebar.host]` option to its next value (or toggle `show_count`),
 /// mutate `AppState.sidebar_host` immediately (so the demo updates before the save round-trips),
@@ -124,6 +124,7 @@ fn cycle_sidebar_host_option(state: &mut AppState) -> Option<SettingsAction> {
         2 => preferences.speed = preferences.speed.next(),
         3 => preferences.glyph = preferences.glyph.next(),
         4 => preferences.show_count = !preferences.show_count,
+        5 => preferences.show_metrics = !preferences.show_metrics,
         _ => return None,
     }
     state.sidebar_host = preferences.clone();
@@ -666,7 +667,7 @@ mod tests {
         assert_eq!(state.settings.list.selected, 0);
         assert_eq!(
             state.sidebar_host.gradient,
-            crate::config::HostBannerGradient::Rainbow
+            crate::config::HostBannerGradient::Solid
         );
 
         let action = update_settings_state(
@@ -676,20 +677,17 @@ mod tests {
 
         assert_eq!(
             state.sidebar_host.gradient,
-            crate::config::HostBannerGradient::Accent
+            crate::config::HostBannerGradient::Rainbow
         );
         match action {
             Some(SettingsAction::SaveSidebarHost {
                 previous,
                 preferences,
             }) => {
-                assert_eq!(
-                    previous.gradient,
-                    crate::config::HostBannerGradient::Rainbow
-                );
+                assert_eq!(previous.gradient, crate::config::HostBannerGradient::Solid);
                 assert_eq!(
                     preferences.gradient,
-                    crate::config::HostBannerGradient::Accent
+                    crate::config::HostBannerGradient::Rainbow
                 );
             }
             other => panic!("expected SaveSidebarHost, got {other:?}"),
@@ -742,13 +740,21 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
         assert!(state.sidebar_host.show_count);
+
+        // row 5: show_metrics false → true.
+        state.settings.list.selected = 5;
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert!(state.sidebar_host.show_metrics);
     }
 
     #[test]
     fn settings_sidebar_host_down_navigates_option_rows() {
         let mut state = state_with_workspaces(&["test"]);
         open_settings_at(&mut state, SettingsSection::SidebarHost);
-        for expected in 1..5usize {
+        for expected in 1..6usize {
             update_settings_state(
                 &mut state,
                 KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
@@ -760,7 +766,7 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
         );
-        assert_eq!(state.settings.list.selected, 4);
+        assert_eq!(state.settings.list.selected, 5);
     }
 
     #[test]

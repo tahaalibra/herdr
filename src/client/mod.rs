@@ -507,9 +507,16 @@ fn dispatch_composited_input(
     // the SAME client action the mouse path uses. Only a single bare Key event is considered; any
     // multi-event/paste/unmatched input falls through to Forward so terminal input is preserved.
     if let [crate::raw_input::RawInputEvent::Key(key)] = events.as_slice() {
-        if let Some(dispatch) = dispatch_composited_key_input(*key, compositor, model) {
+        if let Some(dispatch) = dispatch_composited_key_input(*key, &data, compositor, model) {
             return dispatch;
         }
+    }
+
+    // A dangling prefix (armed, but the next input is a paste/mouse/multi-event batch) belongs
+    // to the server: replay the stashed prefix bytes ahead of the current input.
+    if let Some(mut replay) = compositor.take_prefix_bytes() {
+        replay.extend_from_slice(&data);
+        return ClientInputDispatch::Forward(replay);
     }
 
     ClientInputDispatch::Forward(data)
@@ -520,42 +527,52 @@ fn dispatch_composited_input(
 /// configured sidebar-nav binding so the caller forwards it to the focused remote terminal.
 ///
 /// Gating mirrors the server's two-stage `Mode::Prefix` state machine: the configured prefix key
-/// (a modified chord, e.g. `ctrl+b`) arms `compositor.prefix_armed`; only WHILE armed is the next
-/// key matched against the configured prefix-mode bindings (next/prev workspace+agent, new/rename/
-/// close workspace, sidebar collapse). Direct (modified-chord) bindings still fire without the
-/// prefix, exactly as the server's `terminal_direct_navigation_action` does. Bare, unmodified keys
-/// are never intercepted unless prefix-armed, so normal typing reaches the agent.
+/// (a modified chord, e.g. `ctrl+b`) arms client prefix mode; only WHILE armed is the next key
+/// matched against the configured prefix-mode SIDEBAR bindings (next/prev workspace+agent,
+/// new/rename/close workspace, sidebar collapse). A prefix chord that matches no sidebar binding
+/// is NOT swallowed: the stashed prefix bytes plus the key are replayed to the active server, so
+/// every server-side prefix binding (splits, tabs, zoom, copy mode, detach, …) keeps working.
+/// Direct (modified-chord) bindings still fire without the prefix, exactly as the server's
+/// `terminal_direct_navigation_action` does. Bare, unmodified keys are never intercepted unless
+/// prefix-armed, so normal typing reaches the agent.
 #[cfg(unix)]
 fn dispatch_composited_key_input(
     key: crate::input::TerminalKey,
+    raw_bytes: &[u8],
     compositor: &mut compositor::ClientCompositor,
     model: &mut supervisor::ClientSupervisorModel,
 ) -> Option<ClientInputDispatch> {
     let (keybinds, prefix) = client_navigation_keybinds();
 
     if compositor.prefix_armed() {
-        // Mirror the server's prefix mode: Esc / the prefix key itself just leaves prefix mode and
-        // is swallowed (never forwarded to the terminal). Any other key resolves a prefix-mode
-        // binding (or, if none matches, is consumed — the server's prefix mode does not forward
-        // unbound keys to the pane).
-        compositor.disarm_prefix();
         let key_event = key.as_key_event();
+        // Esc or a repeated prefix press cancels prefix mode without reaching the server,
+        // matching the server's own prefix-mode escape behavior.
         if key_event.code == crossterm::event::KeyCode::Esc
             || crate::config::terminal_key_matches_combo(key, prefix)
         {
+            compositor.disarm_prefix();
             return Some(ClientInputDispatch::Redraw);
         }
-        return Some(
+        if let Some(dispatch) =
             sidebar_action_dispatch(&keybinds, key, compositor, model, ActionTrigger::Prefix)
-                .unwrap_or(ClientInputDispatch::Redraw),
-        );
+        {
+            compositor.disarm_prefix();
+            return Some(dispatch);
+        }
+        // Not a sidebar chord: this prefix binding lives on the server. Replay the stashed
+        // prefix bytes followed by the key so the server's prefix state machine resolves it.
+        let mut replay = compositor.take_prefix_bytes().unwrap_or_default();
+        replay.extend_from_slice(raw_bytes);
+        return Some(ClientInputDispatch::Forward(replay));
     }
 
-    // Not armed: a press of the configured prefix key arms prefix mode (and is swallowed). Other
-    // keys only fire if they match a DIRECT (modified-chord) sidebar-nav binding; everything else
-    // returns None so the caller forwards it to the terminal.
+    // Not armed: a press of the configured prefix key arms prefix mode (and is held back until
+    // the follow-up key decides whether the chord is client- or server-side). Other keys only
+    // fire if they match a DIRECT (modified-chord) sidebar-nav binding; everything else returns
+    // None so the caller forwards it to the terminal.
     if crate::config::terminal_key_matches_combo(key, prefix) {
-        compositor.arm_prefix();
+        compositor.arm_prefix(raw_bytes.to_vec());
         return Some(ClientInputDispatch::Redraw);
     }
 
@@ -8251,6 +8268,97 @@ mod tests {
                     );
                 },
             );
+        }
+
+        // A prefix chord with no client-side sidebar binding must NOT be swallowed: the stashed
+        // prefix bytes plus the key are replayed to the server, so server-side prefix bindings
+        // (splits, tabs, zoom, copy mode, …) keep working from the composited client.
+        #[test]
+        fn unmatched_prefix_chord_replays_prefix_and_key_to_server() {
+            with_client_keys_config(
+                "[keys]\nprefix = \"ctrl+b\"\nnext_workspace = \"prefix+n\"\n",
+                || {
+                    let (mut model, _) = mixed_remote_model();
+                    let mut compositor = compositor::ClientCompositor::new(26);
+
+                    // Arm prefix mode (ctrl+b == 0x02): swallowed while the chord is undecided.
+                    assert_eq!(
+                        dispatch_composited_input(
+                            vec![0x02],
+                            &mut compositor,
+                            &mut model,
+                            (60, 16),
+                        ),
+                        ClientInputDispatch::Redraw
+                    );
+                    assert!(compositor.prefix_armed());
+
+                    // '%' matches no sidebar binding: the server owns this chord. Both the
+                    // prefix byte and the key must arrive, in order.
+                    assert_eq!(
+                        press_char('%', &mut compositor, &mut model),
+                        ClientInputDispatch::Forward(b"\x02%".to_vec())
+                    );
+                    assert!(!compositor.prefix_armed());
+                },
+            );
+        }
+
+        // Esc and a repeated prefix press cancel client prefix mode without leaking bytes to
+        // the server, matching the server's own prefix-mode escape behavior.
+        #[test]
+        fn prefix_cancel_keys_are_swallowed() {
+            with_client_keys_config("[keys]\nprefix = \"ctrl+b\"\n", || {
+                let (mut model, _) = mixed_remote_model();
+                let mut compositor = compositor::ClientCompositor::new(26);
+
+                for cancel in [b"\x1b".to_vec(), vec![0x02]] {
+                    assert_eq!(
+                        dispatch_composited_input(
+                            vec![0x02],
+                            &mut compositor,
+                            &mut model,
+                            (60, 16),
+                        ),
+                        ClientInputDispatch::Redraw
+                    );
+                    assert!(compositor.prefix_armed());
+                    assert_eq!(
+                        dispatch_composited_input(cancel, &mut compositor, &mut model, (60, 16)),
+                        ClientInputDispatch::Redraw
+                    );
+                    assert!(!compositor.prefix_armed());
+                }
+            });
+        }
+
+        // A dangling prefix followed by non-key input (paste burst) still reaches the server
+        // with the prefix bytes replayed in front.
+        #[test]
+        fn dangling_prefix_replays_before_multi_event_input() {
+            with_client_keys_config("[keys]\nprefix = \"ctrl+b\"\n", || {
+                let (mut model, _) = mixed_remote_model();
+                let mut compositor = compositor::ClientCompositor::new(26);
+
+                assert_eq!(
+                    dispatch_composited_input(vec![0x02], &mut compositor, &mut model, (60, 16)),
+                    ClientInputDispatch::Redraw
+                );
+                assert!(compositor.prefix_armed());
+
+                // A multi-key burst (e.g. paste) is not a single Key event: forward it with the
+                // prefix bytes prepended.
+                assert_eq!(
+                    dispatch_composited_input(
+                        b"hello".to_vec(),
+                        &mut compositor,
+                        &mut model,
+                        (60, 16),
+                    ),
+                    ClientInputDispatch::Forward(b"\x02hello".to_vec())
+                );
+                assert!(!compositor.prefix_armed());
+            });
         }
 
         // item 6 (Area 6): the focus dispatch emits ImmediateFocused (a server-switching focus).

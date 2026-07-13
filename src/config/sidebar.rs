@@ -292,16 +292,19 @@ pub struct SidebarHostConfig {
     pub speed: HostBannerSpeed,
     pub glyph: HostBannerGlyph,
     pub show_count: bool,
+    /// Show the live latency/throughput readout on connected host banners.
+    pub show_metrics: bool,
 }
 
 impl Default for SidebarHostConfig {
     fn default() -> Self {
         Self {
-            gradient: HostBannerGradient::Rainbow,
+            gradient: HostBannerGradient::Solid,
             animation: HostBannerAnimation::Animated,
             speed: HostBannerSpeed::Calm,
             glyph: HostBannerGlyph::Left,
             show_count: false,
+            show_metrics: false,
         }
     }
 }
@@ -309,6 +312,8 @@ impl Default for SidebarHostConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HostBannerGradient {
+    /// One flat theme color (accent), no per-character shading or animation.
+    Solid,
     Rainbow,
     Accent,
     Cool,
@@ -319,16 +324,18 @@ pub enum HostBannerGradient {
 impl HostBannerGradient {
     pub fn next(self) -> Self {
         match self {
+            Self::Solid => Self::Rainbow,
             Self::Rainbow => Self::Accent,
             Self::Accent => Self::Cool,
             Self::Cool => Self::Warm,
             Self::Warm => Self::Muted,
-            Self::Muted => Self::Rainbow,
+            Self::Muted => Self::Solid,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Solid => "solid",
             Self::Rainbow => "rainbow",
             Self::Accent => "accent",
             Self::Cool => "cool",
@@ -430,6 +437,7 @@ struct RawSidebarHostConfig {
     speed: Option<String>,
     glyph: Option<String>,
     show_count: Option<bool>,
+    show_metrics: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for SidebarHostConfig {
@@ -444,17 +452,19 @@ impl<'de> Deserialize<'de> for SidebarHostConfig {
             speed: parse_host_speed(raw.speed.as_deref()),
             glyph: parse_host_glyph(raw.glyph.as_deref()),
             show_count: raw.show_count.unwrap_or(false),
+            show_metrics: raw.show_metrics.unwrap_or(false),
         })
     }
 }
 
 fn parse_host_gradient(value: Option<&str>) -> HostBannerGradient {
     match value {
+        Some("rainbow") => HostBannerGradient::Rainbow,
         Some("accent") => HostBannerGradient::Accent,
         Some("cool") => HostBannerGradient::Cool,
         Some("warm") => HostBannerGradient::Warm,
         Some("muted") => HostBannerGradient::Muted,
-        _ => HostBannerGradient::Rainbow,
+        _ => HostBannerGradient::Solid,
     }
 }
 
@@ -632,11 +642,12 @@ rows = [["workspace"], ["$jj_status"]]
     #[test]
     fn sidebar_host_config_default() {
         let host = SidebarHostConfig::default();
-        assert_eq!(host.gradient, HostBannerGradient::Rainbow);
+        assert_eq!(host.gradient, HostBannerGradient::Solid);
         assert_eq!(host.animation, HostBannerAnimation::Animated);
         assert_eq!(host.speed, HostBannerSpeed::Calm);
         assert_eq!(host.glyph, HostBannerGlyph::Left);
         assert!(!host.show_count);
+        assert!(!host.show_metrics);
         // A config with no `[ui.sidebar.host]` table yields the default.
         let config = crate::config::Config::default();
         assert_eq!(config.ui.sidebar.host, SidebarHostConfig::default());
@@ -651,7 +662,7 @@ glyph = "none"
         let config: crate::config::Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.sidebar.host.glyph, HostBannerGlyph::None);
         // The other four keep their defaults.
-        assert_eq!(config.ui.sidebar.host.gradient, HostBannerGradient::Rainbow);
+        assert_eq!(config.ui.sidebar.host.gradient, HostBannerGradient::Solid);
         assert_eq!(
             config.ui.sidebar.host.animation,
             HostBannerAnimation::Animated
@@ -699,11 +710,11 @@ glyph = "right"
         }
 
         assert_cycle(
-            HostBannerGradient::Rainbow,
+            HostBannerGradient::Solid,
             HostBannerGradient::next,
             HostBannerGradient::as_str,
             |name| parse_host_gradient(Some(name)),
-            5,
+            6,
         );
         assert_cycle(
             HostBannerAnimation::Animated,

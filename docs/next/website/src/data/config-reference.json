@@ -689,9 +689,10 @@
         {
           "key": "ui.sidebar.host.gradient",
           "type": "string",
-          "default": "\"rainbow\"",
-          "description": "Color gradient for per-host banner rows shown above each remote host's spaces in a multi-server sidebar. Unknown values fall back to the default.",
+          "default": "\"solid\"",
+          "description": "Color style for per-host banner names in a multi-server sidebar. \"solid\" uses one flat theme accent color; the other values are shaded/animated presets. Unknown values fall back to the default.",
           "values": [
+            "solid",
             "rainbow",
             "accent",
             "cool",
@@ -735,6 +736,12 @@
           "type": "bool",
           "default": "false",
           "description": "Show the host's space count on its banner row."
+        },
+        {
+          "key": "ui.sidebar.host.show_metrics",
+          "type": "bool",
+          "default": "false",
+          "description": "Show the live latency and download-rate readout on connected host banners."
         },
         {
           "key": "ui.accent",

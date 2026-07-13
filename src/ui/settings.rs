@@ -436,7 +436,7 @@ fn render_settings_sidebar_host(app: &AppState, frame: &mut Frame, area: Rect) {
     );
 
     let host = &app.sidebar_host;
-    let options: [(usize, &str, String); 5] = [
+    let options: [(usize, &str, String); 6] = [
         (0, "gradient", format!("< {} >", host.gradient.as_str())),
         (1, "animation", format!("< {} >", host.animation.as_str())),
         (2, "speed", format!("< {} >", host.speed.as_str())),
@@ -447,6 +447,14 @@ fn render_settings_sidebar_host(app: &AppState, frame: &mut Frame, area: Rect) {
             format!(
                 "{} show space count",
                 if host.show_count { "[✓]" } else { "[ ]" }
+            ),
+        ),
+        (
+            5,
+            "metrics",
+            format!(
+                "{} show latency + throughput",
+                if host.show_metrics { "[✓]" } else { "[ ]" }
             ),
         ),
     ];
@@ -606,13 +614,14 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("gradient"));
-        assert!(rendered.contains("rainbow"));
+        assert!(rendered.contains("solid"));
         assert!(rendered.contains("animation"));
         assert!(rendered.contains("animated"));
         assert!(rendered.contains("speed"));
         assert!(rendered.contains("calm"));
         assert!(rendered.contains("glyph"));
         assert!(rendered.contains("show space count"));
+        assert!(rendered.contains("show latency + throughput"));
         assert!(rendered.contains("demo host"));
         assert!(rendered.contains("demo"));
         // No off control.

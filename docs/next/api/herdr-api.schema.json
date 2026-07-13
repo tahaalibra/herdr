@@ -6485,14 +6485,23 @@
           "type": "string"
         },
         "HostBannerGradient": {
-          "enum": [
-            "rainbow",
-            "accent",
-            "cool",
-            "warm",
-            "muted"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "rainbow",
+                "accent",
+                "cool",
+                "warm",
+                "muted"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "solid",
+              "description": "One flat theme color (accent), no per-character shading or animation.",
+              "type": "string"
+            }
+          ]
         },
         "HostBannerSpeed": {
           "enum": [
@@ -9323,6 +9332,10 @@
             "show_count": {
               "type": "boolean"
             },
+            "show_metrics": {
+              "description": "Show the live latency/throughput readout on connected host banners.",
+              "type": "boolean"
+            },
             "speed": {
               "$ref": "#/schemas/success_response/$defs/HostBannerSpeed"
             }
@@ -9332,7 +9345,8 @@
             "animation",
             "speed",
             "glyph",
-            "show_count"
+            "show_count",
+            "show_metrics"
           ],
           "type": "object"
         },

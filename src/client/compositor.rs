@@ -179,7 +179,10 @@ pub(crate) struct ClientCompositor {
     // configured prefix key (a modified chord, e.g. `ctrl+b`) arms interception of the very next
     // key for prefix-bound sidebar-nav actions. Bare keys are never intercepted unless armed, so
     // normal terminal input is preserved.
-    prefix_armed: bool,
+    /// #24: the raw bytes of the pressed prefix key while prefix mode is armed. `Some` means
+    /// armed; the bytes are replayed to the active server when a follow-up key matches no
+    /// client-side binding, so server-side prefix chords keep working.
+    pending_prefix_bytes: Option<Vec<u8>>,
     // #22: client-local collapsed worktree-group keys. The server persists its OWN set
     // (`AppState.collapsed_space_keys`); collapse of the client's AGGREGATED multi-host view is a
     // per-client display concern, so the client owns this set (no server round-trip). Fed into
@@ -311,7 +314,7 @@ impl ClientCompositor {
             hover: None,
             agent_panel_sort: crate::app::state::AgentPanelSort::default(),
             sidebar_collapsed: false,
-            prefix_armed: false,
+            pending_prefix_bytes: None,
             collapsed_space_keys: std::collections::HashSet::new(),
         }
     }
@@ -323,17 +326,27 @@ impl ClientCompositor {
     /// #24: whether the prefix key has been pressed and the next key should be matched against
     /// prefix-mode bindings.
     pub(crate) fn prefix_armed(&self) -> bool {
-        self.prefix_armed
+        self.pending_prefix_bytes.is_some()
     }
 
-    /// #24: arm prefix mode (the configured prefix key was pressed).
-    pub(crate) fn arm_prefix(&mut self) {
-        self.prefix_armed = true;
+    /// #24: arm prefix mode (the configured prefix key was pressed), stashing the prefix
+    /// keypress's raw bytes so an unmatched follow-up key can replay `prefix + key` to the
+    /// active server — server-side prefix bindings (splits, tabs, zoom, copy mode, …) have no
+    /// client-rendered equivalent and must reach the server's own prefix state machine.
+    pub(crate) fn arm_prefix(&mut self, prefix_bytes: Vec<u8>) {
+        self.pending_prefix_bytes = Some(prefix_bytes);
     }
 
-    /// #24: clear prefix mode (a key was resolved/consumed, or it did not match a binding).
+    /// #24: clear prefix mode, returning the stashed prefix bytes so the caller can replay
+    /// them ahead of the current input when no client-side binding matched.
+    pub(crate) fn take_prefix_bytes(&mut self) -> Option<Vec<u8>> {
+        self.pending_prefix_bytes.take()
+    }
+
+    /// #24: clear prefix mode and drop the stashed bytes (a client-side binding consumed the
+    /// chord, or the prefix was cancelled).
     pub(crate) fn disarm_prefix(&mut self) {
-        self.prefix_armed = false;
+        self.pending_prefix_bytes = None;
     }
 
     /// #24: test accessor for the client-local collapsed-sidebar flag (the value `from_model`

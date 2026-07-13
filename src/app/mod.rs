@@ -2482,6 +2482,7 @@ mod tests {
             speed: crate::config::HostBannerSpeed::Lively,
             glyph: crate::config::HostBannerGlyph::None,
             show_count: true,
+            show_metrics: true,
         };
 
         assert!(app.save_sidebar_host_preferences(preferences.clone()));
@@ -2494,6 +2495,7 @@ mod tests {
         assert!(content.contains(r#"speed = "lively""#));
         assert!(content.contains(r#"glyph = "none""#));
         assert!(content.contains("show_count = true"));
+        assert!(content.contains("show_metrics = true"));
         assert_eq!(app.state.sidebar_host, preferences);
         assert!(app.state.config_diagnostic.is_none());
 

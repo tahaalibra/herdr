@@ -312,6 +312,8 @@ fn host_banner_base_color(
 ) -> Option<Color> {
     use crate::config::HostBannerGradient;
     match gradient {
+        // Solid is handled before base-color scaling in `host_banner_spans`.
+        HostBannerGradient::Solid => Some(p.accent),
         HostBannerGradient::Rainbow => None,
         HostBannerGradient::Accent => Some(p.accent),
         HostBannerGradient::Cool => Some(p.teal),
@@ -339,6 +341,14 @@ fn host_banner_spans(
     p: &Palette,
 ) -> Vec<Span<'static>> {
     use crate::config::HostBannerAnimation;
+    // Solid mode: one flat theme color for the whole name — no per-character
+    // luma wave and no animation, regardless of the animation setting.
+    if cfg.gradient == crate::config::HostBannerGradient::Solid {
+        return vec![Span::styled(
+            name.to_string(),
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        )];
+    }
     let speed = match cfg.animation {
         HostBannerAnimation::Static => 0.0,
         HostBannerAnimation::Animated => cfg.speed.drift(),
@@ -1644,17 +1654,20 @@ fn render_workspace_list(
             Rect::new(banner_area.rect.x, row_y, banner_area.rect.width, 1),
         );
 
-        // Right-aligned `↓rate ping` health readout. Drawn in its own sub-rect at the right
+        // Right-aligned `↓rate ping` health readout, opt-in via
+        // `[ui.sidebar.host] show_metrics`. Drawn in its own sub-rect at the right
         // edge so it never erases the name; skipped when the row is too narrow to fit it with
         // at least one column of breathing room.
-        let (metric_spans, metric_width) = host_banner_metric_spans(spec, p);
-        let banner_width = banner_area.rect.width as usize;
-        if metric_width > 0 && banner_width > name_width + metric_width {
-            let metric_x = banner_area.rect.x + banner_area.rect.width - metric_width as u16;
-            frame.render_widget(
-                Paragraph::new(Line::from(metric_spans)),
-                Rect::new(metric_x, row_y, metric_width as u16, 1),
-            );
+        if app.sidebar_host.show_metrics {
+            let (metric_spans, metric_width) = host_banner_metric_spans(spec, p);
+            let banner_width = banner_area.rect.width as usize;
+            if metric_width > 0 && banner_width > name_width + metric_width {
+                let metric_x = banner_area.rect.x + banner_area.rect.width - metric_width as u16;
+                frame.render_widget(
+                    Paragraph::new(Line::from(metric_spans)),
+                    Rect::new(metric_x, row_y, metric_width as u16, 1),
+                );
+            }
         }
     }
 
@@ -3553,8 +3566,10 @@ mod tests {
         let p = Palette::catppuccin();
         let colors = |spans: &[Span<'static>]| spans.iter().map(|s| s.style.fg).collect::<Vec<_>>();
 
-        // Static (speed 0): tick 0 == tick N.
+        // Static (speed 0): tick 0 == tick N. Uses the rainbow preset explicitly —
+        // the solid default renders one flat span and never animates.
         let static_cfg = crate::config::SidebarHostConfig {
+            gradient: crate::config::HostBannerGradient::Rainbow,
             animation: crate::config::HostBannerAnimation::Static,
             ..Default::default()
         };
@@ -3564,6 +3579,7 @@ mod tests {
 
         // Animated: tick 0 differs from tick N.
         let anim_cfg = crate::config::SidebarHostConfig {
+            gradient: crate::config::HostBannerGradient::Rainbow,
             animation: crate::config::HostBannerAnimation::Animated,
             speed: crate::config::HostBannerSpeed::Lively,
             ..Default::default()
@@ -3575,6 +3591,23 @@ mod tests {
             colors(&anim_n),
             "animated advances with tick"
         );
+    }
+
+    #[test]
+    fn host_banner_solid_renders_one_flat_accent_span() {
+        // The solid default paints the whole name as a single flat accent span:
+        // no per-character shading and no animation drift between ticks.
+        let p = Palette::catppuccin();
+        let cfg = crate::config::SidebarHostConfig::default();
+        assert_eq!(cfg.gradient, crate::config::HostBannerGradient::Solid);
+
+        let at_0 = host_banner_spans("demo", 0, &cfg, &p);
+        let at_n = host_banner_spans("demo", 64, &cfg, &p);
+
+        assert_eq!(at_0.len(), 1, "solid renders one span for the whole name");
+        assert_eq!(at_0[0].content.as_ref(), "demo");
+        assert_eq!(at_0[0].style.fg, Some(p.accent));
+        assert_eq!(at_0, at_n, "solid never animates");
     }
 
     #[test]

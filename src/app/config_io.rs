@@ -158,11 +158,12 @@ impl App {
 /// same `SidebarHostConfig`.
 fn host_sidebar_config_body(preferences: &crate::config::SidebarHostConfig) -> String {
     format!(
-        "gradient = \"{}\"\nanimation = \"{}\"\nspeed = \"{}\"\nglyph = \"{}\"\nshow_count = {}\n",
+        "gradient = \"{}\"\nanimation = \"{}\"\nspeed = \"{}\"\nglyph = \"{}\"\nshow_count = {}\nshow_metrics = {}\n",
         preferences.gradient.as_str(),
         preferences.animation.as_str(),
         preferences.speed.as_str(),
         preferences.glyph.as_str(),
         preferences.show_count,
+        preferences.show_metrics,
     )
 }
