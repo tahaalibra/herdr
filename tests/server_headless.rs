@@ -179,6 +179,7 @@ fn client_handshake(
             &encode_varint_u32(8),  // cell_width_px
             &encode_varint_u32(16), // cell_height_px
             &encode_varint_u32(0),  // RenderEncoding::SemanticFrame
+            &encode_varint_u32(0),  // ClientSurfaceMode::FullApp
             &encode_varint_u32(0),  // ClientKeybindings::Server
             &encode_varint_u32(0),  // ClientLaunchMode::App
         ],

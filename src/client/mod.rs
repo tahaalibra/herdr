@@ -66,6 +66,10 @@ struct ClientLoopConfig {
 struct ClientState {
     /// Stateful semantic-frame encoder used when the server sends FrameData.
     blit_encoder: render_ansi::BlitEncoder,
+    /// Last full server frame, exactly as received, used as the baseline for
+    /// `ServerMessage::FrameDelta` reconstruction. Kept separate from the blit
+    /// encoder's committed frame, which may contain a locally drawn cursor.
+    server_frame_baseline: Option<protocol::FrameData>,
     /// Whether host mouse capture is currently active.
     mouse_capture_active: bool,
     /// The terminal size we reported to the server in our last Hello/Resize.
@@ -749,6 +753,7 @@ fn do_handshake(
         cell_width_px,
         cell_height_px,
         requested_encoding,
+        surface_mode: protocol::ClientSurfaceMode::FullApp,
         keybindings: requested_keybindings(),
         launch_mode: if direct_attach_requested {
             ClientLaunchMode::TerminalAttach
@@ -1285,6 +1290,7 @@ async fn run_client_loop(
 
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
+        server_frame_baseline: None,
         mouse_capture_active: config.mouse_capture_active,
         reported_size: (cols, rows),
         sound_config: config.sound_config,
@@ -1503,28 +1509,32 @@ async fn run_client_loop(
             }
             ClientLoopEvent::ServerMessage(msg) => match msg {
                 ServerMessage::Frame(frame_data) => {
-                    let frame_data = if state.draw_host_cursor {
-                        render_ansi::frame_with_drawn_cursor(frame_data)
-                    } else {
-                        frame_data
+                    state.server_frame_baseline = Some(frame_data.clone());
+                    draw_semantic_frame(&mut state, frame_data);
+                }
+                ServerMessage::FrameDelta(delta) => {
+                    // Reconstruct the full frame from the cached baseline. On a
+                    // baseline mismatch (e.g. just after a local resize) skip the
+                    // delta; the server re-baselines with a full frame on any
+                    // dimension change.
+                    let Some(frame_data) = state
+                        .server_frame_baseline
+                        .as_ref()
+                        .and_then(|prev| prev.with_delta(&delta))
+                    else {
+                        debug!("dropping frame delta without matching baseline");
+                        continue;
                     };
-                    let encoded = if state.draw_host_cursor {
-                        state
-                            .blit_encoder
-                            .encode_with_suppressed_visible_cursor(&frame_data, false)
-                    } else {
-                        state.blit_encoder.encode(&frame_data, false)
-                    };
-                    let mut stdout = io::stdout();
-                    let graphics = if state.kitty_graphics_enabled {
-                        frame_data.graphics.as_slice()
-                    } else {
-                        &[]
-                    };
-                    let _ =
-                        write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
-                    let _ = stdout.flush();
-                    state.blit_encoder.commit(frame_data, encoded);
+                    state.server_frame_baseline = Some(frame_data.clone());
+                    draw_semantic_frame(&mut state, frame_data);
+                }
+                ServerMessage::Pong { .. } => {
+                    // Single-server clients do not probe latency; ignore.
+                }
+                ServerMessage::Compressed(_) => {
+                    // The reader thread inflates compressed payloads; reaching this
+                    // arm means the payload failed to inflate.
+                    warn!("dropping server message that failed to inflate");
                 }
                 ServerMessage::Terminal(frame) => {
                     if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {
@@ -1638,6 +1648,9 @@ fn server_reader_thread(
 
         match protocol::read_message(&mut stream, max_frame_size) {
             Ok(msg) => {
+                // Inflate compressed payloads on the reader thread so the main
+                // loop only ever sees plain messages.
+                let msg = protocol::decompress_server_message(msg);
                 if event_tx
                     .blocking_send(ClientLoopEvent::ServerMessage(msg))
                     .is_err()
@@ -1960,6 +1973,33 @@ fn write_window_title(title: Option<&str>) {
 // ---------------------------------------------------------------------------
 // Frame output
 // ---------------------------------------------------------------------------
+
+/// Encode and blit one full semantic frame to the host terminal, committing it
+/// as the blit encoder's diff baseline. Shared by the full-frame and
+/// delta-reconstruction paths.
+fn draw_semantic_frame(state: &mut ClientState, frame_data: protocol::FrameData) {
+    let frame_data = if state.draw_host_cursor {
+        render_ansi::frame_with_drawn_cursor(frame_data)
+    } else {
+        frame_data
+    };
+    let encoded = if state.draw_host_cursor {
+        state
+            .blit_encoder
+            .encode_with_suppressed_visible_cursor(&frame_data, false)
+    } else {
+        state.blit_encoder.encode(&frame_data, false)
+    };
+    let mut stdout = io::stdout();
+    let graphics = if state.kitty_graphics_enabled {
+        frame_data.graphics.as_slice()
+    } else {
+        &[]
+    };
+    let _ = write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
+    let _ = stdout.flush();
+    state.blit_encoder.commit(frame_data, encoded);
+}
 
 fn write_encoded_frame_with_graphics(
     mut writer: impl io::Write,

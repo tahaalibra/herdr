@@ -72,7 +72,10 @@ pub enum Subscription {
     },
     #[serde(rename = "pane.agent_status_changed")]
     PaneAgentStatusChanged {
-        pane_id: String,
+        /// Limit the subscription to one pane. When omitted, status changes
+        /// for every pane stream to the subscriber.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_status: Option<AgentStatus>,
     },

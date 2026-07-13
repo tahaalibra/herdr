@@ -124,6 +124,7 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
         cell_width_px: 0,
         cell_height_px: 0,
         requested_encoding: crate::protocol::RenderEncoding::SemanticFrame,
+        surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
         keybindings: crate::protocol::ClientKeybindings::Server,
         launch_mode: crate::protocol::ClientLaunchMode::App,
     };

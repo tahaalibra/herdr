@@ -915,6 +915,14 @@ impl App {
                 );
             }
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
+            Method::ServerUiSettings(_) => {
+                return responses::encode_success(
+                    request.id,
+                    ResponseResult::UiSettings {
+                        settings: self.ui_settings_info(),
+                    },
+                );
+            }
             Method::RemoteList(_) => return self.handle_remote_list(request.id),
             Method::RemoteAdd(params) => return self.handle_remote_add(request.id, params),
             Method::RemoteRemove(params) => {
@@ -1165,6 +1173,28 @@ impl App {
     pub(crate) fn mark_api_notification_shown(&mut self, now: Instant) {
         self.last_api_notification_at = Some(now);
     }
+
+    fn ui_settings_info(&self) -> crate::api::schema::UiSettingsInfo {
+        crate::api::schema::UiSettingsInfo {
+            sidebar_width: self.state.sidebar_width,
+            sidebar_default_width: self.state.default_sidebar_width,
+            sidebar_min_width: self.state.sidebar_min_width,
+            sidebar_max_width: self.state.sidebar_max_width,
+            sidebar_section_split_per_mille: sidebar_split_per_mille(
+                self.state.sidebar_section_split,
+            ),
+            sidebar_spaces: self.state.sidebar_spaces.clone(),
+            sidebar_agents: self.state.sidebar_agents.clone(),
+            sidebar_host: self.state.sidebar_host.clone(),
+        }
+    }
+}
+
+fn sidebar_split_per_mille(split: f32) -> u16 {
+    if !split.is_finite() {
+        return 500;
+    }
+    (split.clamp(0.1, 0.9) * 1000.0).round() as u16
 }
 
 fn sanitized_notification_text(value: &str, max_chars: usize) -> Option<String> {

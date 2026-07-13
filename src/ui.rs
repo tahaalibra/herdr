@@ -154,6 +154,93 @@ pub(crate) fn compute_view_without_resizing_panes(
     );
 }
 
+/// Compute view state for an embedded-content client surface: the full Herdr
+/// content column (tab bar + panes + overlays) without the sidebar. Used by
+/// multi-server clients that render their own unified sidebar and embed this
+/// server's content next to it.
+pub(crate) fn compute_embedded_content_view_with_cell_size(
+    app: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) {
+    let (tab_bar_rect, terminal_area) = app
+        .active
+        .and_then(|i| app.workspaces.get(i))
+        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, area))
+        .unwrap_or((Rect::default(), area));
+
+    let tab_bar_view = app
+        .active
+        .and_then(|i| app.workspaces.get(i))
+        .map(|ws| {
+            compute_tab_bar_view(
+                ws,
+                tab_bar_rect,
+                app.tab_scroll,
+                app.tab_scroll_follow_active,
+                app.mouse_capture,
+            )
+        })
+        .unwrap_or_default();
+    app.tab_scroll = tab_bar_view.scroll;
+
+    let split_borders = app
+        .active
+        .and_then(|i| app.workspaces.get(i))
+        .map(|ws| {
+            if ws.zoomed {
+                Vec::new()
+            } else {
+                ws.layout.splits(terminal_area)
+            }
+        })
+        .unwrap_or_default();
+
+    let pane_infos = compute_pane_infos(
+        app,
+        terminal_runtimes,
+        terminal_area,
+        resize_panes,
+        cell_size,
+    );
+    if resize_panes {
+        resize_background_tab_panes_to_area(app, terminal_runtimes, terminal_area, cell_size);
+    }
+
+    let toast_hit_area = app
+        .toast
+        .as_ref()
+        .map(|toast| {
+            toast_notification_rect(
+                area,
+                toast,
+                app.config_diagnostic.is_some(),
+                toast.position.unwrap_or(app.toast_config.herdr.position),
+            )
+        })
+        .unwrap_or_default();
+
+    app.view = crate::app::ViewState {
+        layout: ViewLayout::Desktop,
+        sidebar_rect: Rect::default(),
+        workspace_card_areas: Vec::new(),
+        tab_bar_rect,
+        tab_hit_areas: tab_bar_view.tab_hit_areas,
+        tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
+        tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
+        new_tab_hit_area: tab_bar_view.new_tab_hit_area,
+        terminal_area,
+        mobile_header_rect: Rect::default(),
+        mobile_menu_hit_area: Rect::default(),
+        toast_hit_area,
+        pane_infos,
+        split_borders,
+    };
+    app.sync_copy_mode_search_geometry();
+}
+
 fn resize_background_tab_panes_to_area(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -405,8 +492,6 @@ pub fn render_with_runtime_registry(
     frame: &mut Frame,
 ) {
     let sidebar_area = app.view.sidebar_rect;
-    let tab_bar_area = app.view.tab_bar_rect;
-    let terminal_area = app.view.terminal_area;
 
     if app.view.layout == ViewLayout::Mobile {
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
@@ -417,6 +502,29 @@ pub fn render_with_runtime_registry(
             render_sidebar(app, terminal_runtimes, frame, sidebar_area);
         }
     }
+    render_content_and_overlays(app, terminal_runtimes, frame, true);
+}
+
+/// Render the Herdr content column only (tab bar + panes + overlays, no
+/// sidebar) for an embedded-content client surface. `compute_embedded_content_view_with_cell_size`
+/// must have populated `app.view` first.
+pub(crate) fn render_embedded_content_with_runtime_registry(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+) {
+    render_content_and_overlays(app, terminal_runtimes, frame, false);
+}
+
+fn render_content_and_overlays(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    include_global_surfaces: bool,
+) {
+    let tab_bar_area = app.view.tab_bar_rect;
+    let terminal_area = app.view.terminal_area;
+
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
     }
@@ -449,7 +557,10 @@ pub fn render_with_runtime_registry(
             render_open_existing_worktree_overlay(app, frame, frame.area())
         }
         Mode::ConfirmRemoveWorktree => render_remove_worktree_overlay(app, frame, frame.area()),
-        Mode::GlobalMenu => render_global_launcher_menu(app, frame),
+        Mode::GlobalMenu if include_global_surfaces => render_global_launcher_menu(app, frame),
+        // Embedded-content clients own the global menu surface; the server
+        // must not double-draw it inside the content column.
+        Mode::GlobalMenu => {}
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::Terminal => {}

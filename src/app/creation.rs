@@ -447,6 +447,7 @@ impl App {
             workspace_id: self.public_workspace_id(index),
             number: index + 1,
             label: ws.display_name_from(&self.state.terminals, &self.terminal_runtimes),
+            branch: ws.cached_git_branch.clone(),
             focused: self.state.active == Some(index),
             pane_count: ws.public_pane_numbers.len(),
             tab_count: ws.tabs.len(),

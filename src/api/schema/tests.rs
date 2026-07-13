@@ -169,6 +169,59 @@ fn request_round_trips_for_server_agent_manifests() {
 }
 
 #[test]
+fn request_round_trips_for_server_ui_settings() {
+    let request = Request {
+        id: "req_ui_settings".into(),
+        method: Method::ServerUiSettings(EmptyParams::default()),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "server.ui_settings");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+
+    let response = SuccessResponse {
+        id: "req_ui_settings".into(),
+        result: ResponseResult::UiSettings {
+            settings: UiSettingsInfo::default(),
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
+fn subscribe_request_parses_all_agent_status_subscription() {
+    let json = r#"
+    {
+        "id": "sub_all_status",
+        "method": "events.subscribe",
+        "params": {
+            "subscriptions": [
+                {
+                    "type": "pane.agent_status_changed"
+                }
+            ]
+        }
+    }
+    "#;
+
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::EventsSubscribe(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+
+    assert_eq!(
+        params.subscriptions,
+        vec![Subscription::PaneAgentStatusChanged {
+            pane_id: None,
+            agent_status: None,
+        }]
+    );
+}
+
+#[test]
 fn request_round_trips_for_remote_methods() {
     let add = Request {
         id: "req_remote_add".into(),
@@ -533,7 +586,7 @@ fn subscribe_request_parses_parameterized_subscriptions() {
     assert!(matches!(
         &params.subscriptions[1],
         Subscription::PaneAgentStatusChanged {
-            pane_id,
+            pane_id: Some(pane_id),
             agent_status: Some(AgentStatus::Done),
         } if pane_id == "p_1_1"
     ));
@@ -666,6 +719,7 @@ fn worktree_request_and_response_round_trip() {
                 workspace_id: "w_1".into(),
                 number: 2,
                 label: "herdr".into(),
+                branch: None,
                 focused: true,
                 pane_count: 1,
                 tab_count: 1,
@@ -752,6 +806,7 @@ fn worktree_lifecycle_events_round_trip() {
         workspace_id: "w_2".into(),
         number: 2,
         label: "herdr".into(),
+        branch: None,
         focused: true,
         pane_count: 1,
         tab_count: 1,

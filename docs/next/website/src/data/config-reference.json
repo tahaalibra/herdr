@@ -687,6 +687,56 @@
           "description": "Expanded Space sidebar layout. Supports built-in tokens and $name metadata tokens; at most 16 rows and 16 tokens per row."
         },
         {
+          "key": "ui.sidebar.host.gradient",
+          "type": "string",
+          "default": "\"rainbow\"",
+          "description": "Color gradient for per-host banner rows shown above each remote host's spaces in a multi-server sidebar. Unknown values fall back to the default.",
+          "values": [
+            "rainbow",
+            "accent",
+            "cool",
+            "warm",
+            "muted"
+          ]
+        },
+        {
+          "key": "ui.sidebar.host.animation",
+          "type": "string",
+          "default": "\"animated\"",
+          "description": "Whether the host banner gradient animates. Unknown values fall back to the default.",
+          "values": [
+            "animated",
+            "static"
+          ]
+        },
+        {
+          "key": "ui.sidebar.host.speed",
+          "type": "string",
+          "default": "\"calm\"",
+          "description": "Host banner gradient animation speed. Unknown values fall back to the default.",
+          "values": [
+            "calm",
+            "normal",
+            "lively"
+          ]
+        },
+        {
+          "key": "ui.sidebar.host.glyph",
+          "type": "string",
+          "default": "\"left\"",
+          "description": "Host glyph placement on the banner row. Unknown values fall back to the default.",
+          "values": [
+            "left",
+            "none"
+          ]
+        },
+        {
+          "key": "ui.sidebar.host.show_count",
+          "type": "bool",
+          "default": "false",
+          "description": "Show the host's space count on its banner row."
+        },
+        {
           "key": "ui.accent",
           "type": "color",
           "default": "\"cyan\"",

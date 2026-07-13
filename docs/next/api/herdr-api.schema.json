@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 16,
+  "protocol": 17,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -1029,6 +1029,12 @@
             },
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "focused": {
               "type": "boolean"
@@ -3522,7 +3528,11 @@
                   ]
                 },
                 "pane_id": {
-                  "type": "string"
+                  "description": "Limit the subscription to one pane. When omitted, status changes\nfor every pane stream to the subscriber.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "type": {
                   "const": "pane.agent_status_changed",
@@ -3530,8 +3540,7 @@
                 }
               },
               "required": [
-                "type",
-                "pane_id"
+                "type"
               ],
               "type": "object"
             },
@@ -4007,6 +4016,22 @@
           "properties": {
             "method": {
               "const": "server.reload_agent_manifests",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "server.ui_settings",
               "type": "string"
             },
             "params": {
@@ -5731,6 +5756,10 @@
           ],
           "type": "string"
         },
+        "AgentSidebarToken": {
+          "description": "A builtin sidebar token name, or a `$`-prefixed custom metadata token",
+          "type": "string"
+        },
         "AgentStatus": {
           "enum": [
             "idle",
@@ -5740,6 +5769,43 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "AgentsSidebarConfig": {
+          "properties": {
+            "rows": {
+              "default": [
+                [
+                  "state_icon",
+                  "workspace",
+                  "tab"
+                ],
+                [
+                  "agent"
+                ]
+              ],
+              "items": {
+                "items": {
+                  "$ref": "#/schemas/success_response/$defs/AgentSidebarToken"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "rows_by_agent": {
+              "additionalProperties": {
+                "items": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentSidebarToken"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "type": "object"
+            }
+          },
+          "type": "object"
         },
         "ClientWindowTitleReason": {
           "enum": [
@@ -6401,6 +6467,38 @@
             "pane_agent_detected",
             "pane_agent_status_changed",
             "layout_updated"
+          ],
+          "type": "string"
+        },
+        "HostBannerAnimation": {
+          "enum": [
+            "animated",
+            "static"
+          ],
+          "type": "string"
+        },
+        "HostBannerGlyph": {
+          "enum": [
+            "left",
+            "none"
+          ],
+          "type": "string"
+        },
+        "HostBannerGradient": {
+          "enum": [
+            "rainbow",
+            "accent",
+            "cool",
+            "warm",
+            "muted"
+          ],
+          "type": "string"
+        },
+        "HostBannerSpeed": {
+          "enum": [
+            "calm",
+            "normal",
+            "lively"
           ],
           "type": "string"
         },
@@ -8109,6 +8207,22 @@
             },
             {
               "properties": {
+                "settings": {
+                  "$ref": "#/schemas/success_response/$defs/UiSettingsInfo"
+                },
+                "type": {
+                  "const": "ui_settings",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "settings"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "remotes": {
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/RemoteDefinitionSnapshot"
@@ -9194,6 +9308,62 @@
           ],
           "type": "object"
         },
+        "SidebarHostConfig": {
+          "description": "Host-banner sidebar configuration. Styles the per-host banner row that\nsits above each remote host's spaces in a multi-server sidebar. There is\nno off switch — the banner is always drawn for remote hosts; only its\npresentation is configured here.\n\nDeserialization is hand-written via [`RawSidebarHostConfig`] so unknown\nTOML enum values fall back to the documented defaults instead of failing\nthe parse.",
+          "properties": {
+            "animation": {
+              "$ref": "#/schemas/success_response/$defs/HostBannerAnimation"
+            },
+            "glyph": {
+              "$ref": "#/schemas/success_response/$defs/HostBannerGlyph"
+            },
+            "gradient": {
+              "$ref": "#/schemas/success_response/$defs/HostBannerGradient"
+            },
+            "show_count": {
+              "type": "boolean"
+            },
+            "speed": {
+              "$ref": "#/schemas/success_response/$defs/HostBannerSpeed"
+            }
+          },
+          "required": [
+            "gradient",
+            "animation",
+            "speed",
+            "glyph",
+            "show_count"
+          ],
+          "type": "object"
+        },
+        "SpaceSidebarToken": {
+          "description": "A builtin sidebar token name, or a `$`-prefixed custom metadata token",
+          "type": "string"
+        },
+        "SpacesSidebarConfig": {
+          "properties": {
+            "rows": {
+              "default": [
+                [
+                  "state_icon",
+                  "workspace"
+                ],
+                [
+                  "branch",
+                  "git_status"
+                ]
+              ],
+              "items": {
+                "items": {
+                  "$ref": "#/schemas/success_response/$defs/SpaceSidebarToken"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
         "SplitDirection": {
           "enum": [
             "right",
@@ -9240,6 +9410,61 @@
           ],
           "type": "object"
         },
+        "UiSettingsInfo": {
+          "description": "Server-side UI settings a client needs to render a config-faithful\nsidebar for this server's spaces and agents.",
+          "properties": {
+            "sidebar_agents": {
+              "$ref": "#/schemas/success_response/$defs/AgentsSidebarConfig"
+            },
+            "sidebar_default_width": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sidebar_host": {
+              "$ref": "#/schemas/success_response/$defs/SidebarHostConfig"
+            },
+            "sidebar_max_width": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sidebar_min_width": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sidebar_section_split_per_mille": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sidebar_spaces": {
+              "$ref": "#/schemas/success_response/$defs/SpacesSidebarConfig"
+            },
+            "sidebar_width": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sidebar_width",
+            "sidebar_default_width",
+            "sidebar_min_width",
+            "sidebar_max_width",
+            "sidebar_section_split_per_mille",
+            "sidebar_spaces",
+            "sidebar_agents",
+            "sidebar_host"
+          ],
+          "type": "object"
+        },
         "WorkspaceInfo": {
           "properties": {
             "active_tab_id": {
@@ -9247,6 +9472,12 @@
             },
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "focused": {
               "type": "boolean"

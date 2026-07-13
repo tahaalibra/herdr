@@ -14,9 +14,10 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use serde::Deserialize;
 use serde_json::Value;
 use support::{
-    cleanup_test_base, client_handshake, encode_varint_u32, frame_message, read_server_message,
-    register_runtime_dir, register_spawned_herdr_pid, unregister_spawned_herdr_pid,
-    wait_for_message_variant, wait_for_socket, wait_until, CURRENT_PROTOCOL,
+    cleanup_test_base, client_handshake, decode_varint_u32, encode_varint_u32, frame_message,
+    read_server_message, register_runtime_dir, register_spawned_herdr_pid,
+    unregister_spawned_herdr_pid, wait_for_message_variant, wait_for_socket, wait_until,
+    CURRENT_PROTOCOL,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -204,7 +205,7 @@ fn app_dir_name() -> &'static str {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct FrameWire {
     cells: Vec<CellWire>,
     width: u16,
@@ -215,7 +216,7 @@ struct FrameWire {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct CellWire {
     symbol: String,
     fg: u32,
@@ -225,7 +226,7 @@ struct CellWire {
     hyperlink: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct CursorWire {
     x: u16,
     y: u16,
@@ -251,15 +252,113 @@ fn decode_frame_payload(payload: &[u8]) -> std::io::Result<FrameWire> {
         })
 }
 
-fn read_next_frame_payload(stream: &mut UnixStream, timeout: Duration) -> Result<Vec<u8>, String> {
+/// Mirror of `protocol::FrameDelta` for decoding: the changed cells the server now
+/// streams instead of full frames.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct FrameDeltaWire {
+    width: u16,
+    height: u16,
+    cells: Vec<(u32, CellWire)>,
+    cursor: Option<CursorWire>,
+    hyperlinks: Vec<String>,
+    graphics: Vec<u8>,
+}
+
+/// A blank baseline of the given size, used when the first observed message is a delta.
+fn blank_frame_wire(width: u16, height: u16) -> FrameWire {
+    let count = (width as usize) * (height as usize);
+    FrameWire {
+        cells: vec![
+            CellWire {
+                symbol: " ".to_string(),
+                fg: 0,
+                bg: 0,
+                modifier: 0,
+                skip: false,
+                hyperlink: None,
+            };
+            count
+        ],
+        width,
+        height,
+        cursor: None,
+        hyperlinks: Vec::new(),
+        graphics: Vec::new(),
+    }
+}
+
+/// Reconstruct a full frame by applying `delta` onto `baseline`, mirroring the real client.
+fn apply_frame_delta(baseline: &FrameWire, delta: FrameDeltaWire) -> FrameWire {
+    let mut cells = baseline.cells.clone();
+    for (index, cell) in delta.cells {
+        let i = index as usize;
+        if i < cells.len() {
+            cells[i] = cell;
+        }
+    }
+    FrameWire {
+        cells,
+        width: delta.width,
+        height: delta.height,
+        cursor: delta.cursor,
+        hyperlinks: delta.hyperlinks,
+        graphics: delta.graphics,
+    }
+}
+
+/// Reconstruct a full frame from a ServerMessage variant + payload, mirroring the real client.
+/// Handles Frame (1), FrameDelta (11), and Compressed (13). Returns None for non-frame messages.
+fn frame_from_message(
+    variant: u32,
+    payload: &[u8],
+    baseline: &mut Option<FrameWire>,
+) -> Option<FrameWire> {
+    match variant {
+        1 => {
+            let frame = decode_frame_payload(payload).ok()?;
+            *baseline = Some(frame.clone());
+            Some(frame)
+        }
+        11 => {
+            let (delta, _): (FrameDeltaWire, usize) =
+                bincode::serde::decode_from_slice(payload, bincode::config::standard()).ok()?;
+            let base = baseline
+                .take()
+                .unwrap_or_else(|| blank_frame_wire(delta.width, delta.height));
+            let frame = apply_frame_delta(&base, delta);
+            *baseline = Some(frame.clone());
+            Some(frame)
+        }
+        13 => {
+            let (compressed, _): (Vec<u8>, usize) =
+                bincode::serde::decode_from_slice(payload, bincode::config::standard()).ok()?;
+            let raw = miniz_oxide::inflate::decompress_to_vec(&compressed).ok()?;
+            let (inner_variant, consumed) = decode_varint_u32(&raw, 0).ok()?;
+            frame_from_message(inner_variant, &raw[consumed..], baseline)
+        }
+        _ => None,
+    }
+}
+
+fn read_next_frame_payload(
+    stream: &mut UnixStream,
+    timeout: Duration,
+) -> Result<FrameWire, String> {
     stream
         .set_read_timeout(Some(Duration::from_millis(200)))
         .map_err(|e| e.to_string())?;
+    // Frames arrive as Frame (1), FrameDelta (11), or Compressed (13);
+    // reconstruct a full frame like the real client.
+    let mut baseline: Option<FrameWire> = None;
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         match read_server_message(stream) {
-            Ok((1, payload)) => return Ok(payload),
-            Ok(_) => continue,
+            Ok((variant, payload)) => {
+                if let Some(frame) = frame_from_message(variant, &payload, &mut baseline) {
+                    return Ok(frame);
+                }
+            }
             Err(_) => continue,
         }
     }
@@ -392,10 +491,13 @@ fn client_sees_headless_startup_config_diagnostic() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut found_diagnostic = false;
     let mut last_frame_text = String::new();
+    let mut baseline: Option<FrameWire> = None;
     while Instant::now() < deadline {
         match read_server_message(&mut stream) {
-            Ok((1, payload)) => {
-                let frame = decode_frame_payload(&payload).expect("decode frame");
+            Ok((variant, payload)) => {
+                let Some(frame) = frame_from_message(variant, &payload, &mut baseline) else {
+                    continue;
+                };
                 last_frame_text = frame_text(&frame);
                 if last_frame_text.contains("config.toml")
                     && last_frame_text.contains("herdr config check")
@@ -630,11 +732,11 @@ fn client_receives_frame_after_pane_output() {
     stream.write_all(&framed).expect("send input");
     stream.flush().expect("flush");
 
-    // Read subsequent frames — the server should have re-rendered after
-    // the input was processed.
-    let received_frame = wait_for_message_variant(&mut stream, Duration::from_secs(2), 1)
-        .expect("wait for post-output frame");
-    assert!(received_frame, "should receive a Frame after pane output");
+    // Read subsequent frames — the server should have re-rendered after the
+    // input was processed. The re-render may arrive as a full frame, a frame
+    // delta, or a compressed wrapper; read_next_frame_payload handles all.
+    read_next_frame_payload(&mut stream, Duration::from_secs(2))
+        .expect("should receive a Frame after pane output");
 
     cleanup_spawned_herdr(spawned, base);
 }

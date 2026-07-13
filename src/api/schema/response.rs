@@ -62,6 +62,9 @@ pub enum ResponseResult {
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
     },
+    UiSettings {
+        settings: super::server::UiSettingsInfo,
+    },
     RemoteList {
         remotes: Vec<crate::remote_registry::RemoteDefinitionSnapshot>,
     },

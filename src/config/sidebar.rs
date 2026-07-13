@@ -109,6 +109,33 @@ impl From<String> for AgentSidebarToken {
     }
 }
 
+fn sidebar_token_schema() -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "description": "A builtin sidebar token name, or a `$`-prefixed custom metadata token"
+    })
+}
+
+impl schemars::JsonSchema for AgentSidebarToken {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AgentSidebarToken".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        sidebar_token_schema()
+    }
+}
+
+impl schemars::JsonSchema for SpaceSidebarToken {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SpaceSidebarToken".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        sidebar_token_schema()
+    }
+}
+
 impl<'de> Deserialize<'de> for AgentSidebarToken {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -191,7 +218,7 @@ where
     Ok(rows_by_agent)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AgentsSidebarConfig {
     #[serde(deserialize_with = "deserialize_sidebar_rows")]
@@ -224,7 +251,7 @@ impl Default for AgentsSidebarConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SpacesSidebarConfig {
     #[serde(deserialize_with = "deserialize_sidebar_rows")]
@@ -247,6 +274,210 @@ impl Default for SpacesSidebarConfig {
 pub struct SidebarConfig {
     pub agents: AgentsSidebarConfig,
     pub spaces: SpacesSidebarConfig,
+    pub host: SidebarHostConfig,
+}
+
+/// Host-banner sidebar configuration. Styles the per-host banner row that
+/// sits above each remote host's spaces in a multi-server sidebar. There is
+/// no off switch — the banner is always drawn for remote hosts; only its
+/// presentation is configured here.
+///
+/// Deserialization is hand-written via [`RawSidebarHostConfig`] so unknown
+/// TOML enum values fall back to the documented defaults instead of failing
+/// the parse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct SidebarHostConfig {
+    pub gradient: HostBannerGradient,
+    pub animation: HostBannerAnimation,
+    pub speed: HostBannerSpeed,
+    pub glyph: HostBannerGlyph,
+    pub show_count: bool,
+}
+
+impl Default for SidebarHostConfig {
+    fn default() -> Self {
+        Self {
+            gradient: HostBannerGradient::Rainbow,
+            animation: HostBannerAnimation::Animated,
+            speed: HostBannerSpeed::Calm,
+            glyph: HostBannerGlyph::Left,
+            show_count: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBannerGradient {
+    Rainbow,
+    Accent,
+    Cool,
+    Warm,
+    Muted,
+}
+
+impl HostBannerGradient {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Rainbow => Self::Accent,
+            Self::Accent => Self::Cool,
+            Self::Cool => Self::Warm,
+            Self::Warm => Self::Muted,
+            Self::Muted => Self::Rainbow,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rainbow => "rainbow",
+            Self::Accent => "accent",
+            Self::Cool => "cool",
+            Self::Warm => "warm",
+            Self::Muted => "muted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBannerAnimation {
+    Animated,
+    Static,
+}
+
+impl HostBannerAnimation {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Animated => Self::Static,
+            Self::Static => Self::Animated,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Animated => "animated",
+            Self::Static => "static",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBannerSpeed {
+    Calm,
+    Normal,
+    Lively,
+}
+
+impl HostBannerSpeed {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Calm => Self::Normal,
+            Self::Normal => Self::Lively,
+            Self::Lively => Self::Calm,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Calm => "calm",
+            Self::Normal => "normal",
+            Self::Lively => "lively",
+        }
+    }
+
+    /// Per-tick phase drift used by the lolcat gradient animation. `Calm < Normal < Lively`.
+    pub fn drift(self) -> f32 {
+        match self {
+            Self::Calm => 0.04,
+            Self::Normal => 0.09,
+            Self::Lively => 0.16,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBannerGlyph {
+    Left,
+    None,
+}
+
+impl HostBannerGlyph {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Left => Self::None,
+            Self::None => Self::Left,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::None => "none",
+        }
+    }
+}
+
+/// Raw intermediate for [`SidebarHostConfig`] deserialization. Every enum field is parsed
+/// through a `parse_host_*` helper whose final arm yields the default, so unknown /
+/// missing values degrade to defaults instead of rejecting the config.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct RawSidebarHostConfig {
+    gradient: Option<String>,
+    animation: Option<String>,
+    speed: Option<String>,
+    glyph: Option<String>,
+    show_count: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for SidebarHostConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawSidebarHostConfig::deserialize(deserializer)?;
+        Ok(SidebarHostConfig {
+            gradient: parse_host_gradient(raw.gradient.as_deref()),
+            animation: parse_host_animation(raw.animation.as_deref()),
+            speed: parse_host_speed(raw.speed.as_deref()),
+            glyph: parse_host_glyph(raw.glyph.as_deref()),
+            show_count: raw.show_count.unwrap_or(false),
+        })
+    }
+}
+
+fn parse_host_gradient(value: Option<&str>) -> HostBannerGradient {
+    match value {
+        Some("accent") => HostBannerGradient::Accent,
+        Some("cool") => HostBannerGradient::Cool,
+        Some("warm") => HostBannerGradient::Warm,
+        Some("muted") => HostBannerGradient::Muted,
+        _ => HostBannerGradient::Rainbow,
+    }
+}
+
+fn parse_host_animation(value: Option<&str>) -> HostBannerAnimation {
+    match value {
+        Some("static") => HostBannerAnimation::Static,
+        _ => HostBannerAnimation::Animated,
+    }
+}
+
+fn parse_host_speed(value: Option<&str>) -> HostBannerSpeed {
+    match value {
+        Some("normal") => HostBannerSpeed::Normal,
+        Some("lively") => HostBannerSpeed::Lively,
+        _ => HostBannerSpeed::Calm,
+    }
+}
+
+fn parse_host_glyph(value: Option<&str>) -> HostBannerGlyph {
+    match value {
+        Some("none") => HostBannerGlyph::None,
+        _ => HostBannerGlyph::Left,
+    }
 }
 
 #[cfg(test)]
@@ -396,5 +627,49 @@ rows = [["workspace"], ["$jj_status"]]
                 "accepted key {key:?}"
             );
         }
+    }
+
+    #[test]
+    fn sidebar_host_config_default() {
+        let host = SidebarHostConfig::default();
+        assert_eq!(host.gradient, HostBannerGradient::Rainbow);
+        assert_eq!(host.animation, HostBannerAnimation::Animated);
+        assert_eq!(host.speed, HostBannerSpeed::Calm);
+        assert_eq!(host.glyph, HostBannerGlyph::Left);
+        assert!(!host.show_count);
+        // A config with no `[ui.sidebar.host]` table yields the default.
+        let config = crate::config::Config::default();
+        assert_eq!(config.ui.sidebar.host, SidebarHostConfig::default());
+    }
+
+    #[test]
+    fn sidebar_host_partial_toml_falls_back() {
+        let toml = r#"
+[ui.sidebar.host]
+glyph = "none"
+"#;
+        let config: crate::config::Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sidebar.host.glyph, HostBannerGlyph::None);
+        // The other four keep their defaults.
+        assert_eq!(config.ui.sidebar.host.gradient, HostBannerGradient::Rainbow);
+        assert_eq!(
+            config.ui.sidebar.host.animation,
+            HostBannerAnimation::Animated
+        );
+        assert_eq!(config.ui.sidebar.host.speed, HostBannerSpeed::Calm);
+        assert!(!config.ui.sidebar.host.show_count);
+    }
+
+    #[test]
+    fn sidebar_host_unknown_enum_values_fall_back_to_defaults() {
+        let toml = r#"
+[ui.sidebar.host]
+gradient = "sparkly"
+animation = "off"
+speed = "warp"
+glyph = "right"
+"#;
+        let config: crate::config::Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sidebar.host, SidebarHostConfig::default());
     }
 }

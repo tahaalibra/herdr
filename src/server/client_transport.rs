@@ -289,6 +289,7 @@ pub(crate) enum ServerEvent {
         cell_width_px: u32,
         cell_height_px: u32,
         render_encoding: RenderEncoding,
+        surface_mode: crate::protocol::ClientSurfaceMode,
         keybindings: Option<Box<crate::config::LiveKeybindConfig>>,
         direct_attach_requested: bool,
         writer: ClientWriter,
@@ -340,6 +341,12 @@ pub(crate) enum ServerEvent {
     },
     /// A client detached gracefully.
     ClientDetach { client_id: u64 },
+    /// A client asked the server to open its settings UI.
+    ClientOpenSettings { client_id: u64 },
+    /// A client asked the server to open its keybind help UI.
+    ClientOpenKeybindHelp { client_id: u64 },
+    /// A client sent a latency probe to echo back.
+    ClientPing { client_id: u64, nonce: u64 },
     /// A client connection was lost.
     ClientDisconnected { client_id: u64 },
     /// A client writer drained its render slot and can accept another render.
@@ -461,6 +468,7 @@ pub(crate) fn handle_client_handshake(
         cell_width_px,
         cell_height_px,
         render_encoding,
+        surface_mode,
         keybindings,
         direct_attach_requested,
     ) = match hello {
@@ -471,6 +479,7 @@ pub(crate) fn handle_client_handshake(
             cell_width_px,
             cell_height_px,
             requested_encoding,
+            surface_mode,
             keybindings,
             launch_mode,
         } => {
@@ -510,6 +519,7 @@ pub(crate) fn handle_client_handshake(
                 cell_width_px,
                 cell_height_px,
                 requested_encoding,
+                surface_mode,
                 keybindings,
                 launch_mode == ClientLaunchMode::TerminalAttach,
             )
@@ -564,6 +574,7 @@ pub(crate) fn handle_client_handshake(
         cell_width_px,
         cell_height_px,
         render_encoding,
+        surface_mode,
         keybindings,
         direct_attach_requested,
         writer,
@@ -720,6 +731,9 @@ fn client_read_loop(
                 }
             }
             ClientMessage::Detach => ServerEvent::ClientDetach { client_id },
+            ClientMessage::OpenSettings => ServerEvent::ClientOpenSettings { client_id },
+            ClientMessage::OpenKeybindHelp => ServerEvent::ClientOpenKeybindHelp { client_id },
+            ClientMessage::Ping { nonce } => ServerEvent::ClientPing { client_id, nonce },
             ClientMessage::AttachTerminal {
                 terminal_id,
                 takeover,
@@ -1055,6 +1069,7 @@ new_tab = "ctrl+notakey"
                 cell_width_px: 8,
                 cell_height_px: 16,
                 requested_encoding: RenderEncoding::TerminalAnsi,
+                surface_mode: protocol::ClientSurfaceMode::FullApp,
                 keybindings: ClientKeybindings::Server,
                 launch_mode: ClientLaunchMode::App,
             },
@@ -1087,12 +1102,14 @@ new_tab = "ctrl+notakey"
                 cell_width_px,
                 cell_height_px,
                 render_encoding,
+                surface_mode,
                 keybindings,
                 direct_attach_requested,
                 writer,
             } => {
                 assert_eq!(client_id, 42);
                 assert_eq!((cols, rows), (100, 30));
+                assert_eq!(surface_mode, protocol::ClientSurfaceMode::FullApp);
                 assert_eq!((cell_width_px, cell_height_px), (8, 16));
                 assert_eq!(render_encoding, RenderEncoding::TerminalAnsi);
                 assert!(keybindings.is_none());
@@ -1130,6 +1147,7 @@ new_tab = "ctrl+notakey"
                 cell_width_px: 8,
                 cell_height_px: 16,
                 requested_encoding: RenderEncoding::TerminalAnsi,
+                surface_mode: protocol::ClientSurfaceMode::FullApp,
                 keybindings: ClientKeybindings::Server,
                 launch_mode: ClientLaunchMode::TerminalAttach,
             },

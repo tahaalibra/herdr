@@ -49,8 +49,25 @@ impl ClientRenderState {
                     return None;
                 }
                 crate::render_prof::event("prepare_frame.semantic.changed");
+                // Stream only the changed cells when a delta against the client's last
+                // full frame is meaningfully smaller; otherwise (first frame / resize /
+                // near-full repaint) send a full frame to re-baseline. The client
+                // reconstructs the full frame from its cached baseline.
+                let message = match last_frame.as_ref().and_then(|prev| frame.delta_from(prev)) {
+                    Some(delta) if delta.cells.len() * 4 <= frame.cells.len() * 3 => {
+                        crate::render_prof::event("prepare_frame.semantic.delta");
+                        ServerMessage::FrameDelta(delta)
+                    }
+                    _ => {
+                        crate::render_prof::event("prepare_frame.semantic.full");
+                        ServerMessage::Frame(frame.clone())
+                    }
+                };
+                // Deflate the verbose semantic payload on the wire (full frames are
+                // ~hundreds of KB of per-cell data). The client inflates before dispatching.
                 Some(PreparedRender::Semantic {
-                    message: ServerMessage::Frame(frame),
+                    message: crate::protocol::compress_server_message(message),
+                    frame,
                 })
             }
             Self::TerminalAnsi { blit_encoder, seq } => {
@@ -95,12 +112,9 @@ impl ClientRenderState {
 
     pub(crate) fn commit_sent_frame(&mut self, prepared: PreparedRender) {
         match (self, prepared) {
-            (
-                Self::Semantic { last_frame },
-                PreparedRender::Semantic {
-                    message: ServerMessage::Frame(frame),
-                },
-            ) => *last_frame = Some(frame),
+            (Self::Semantic { last_frame }, PreparedRender::Semantic { frame, .. }) => {
+                *last_frame = Some(frame)
+            }
             (
                 Self::TerminalAnsi { blit_encoder, seq },
                 PreparedRender::TerminalAnsi {
@@ -153,6 +167,9 @@ fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 pub(crate) enum PreparedRender {
     Semantic {
         message: ServerMessage,
+        /// The full frame this message produces on the client, kept for the
+        /// baseline commit (the message itself may be a delta or compressed).
+        frame: FrameData,
     },
     TerminalAnsi {
         message: ServerMessage,
@@ -164,17 +181,14 @@ pub(crate) enum PreparedRender {
 impl PreparedRender {
     pub(crate) fn message(&self) -> &ServerMessage {
         match self {
-            Self::Semantic { message } | Self::TerminalAnsi { message, .. } => message,
+            Self::Semantic { message, .. } | Self::TerminalAnsi { message, .. } => message,
         }
     }
 
     pub(crate) fn into_frame(self) -> Option<FrameData> {
         match self {
-            Self::Semantic {
-                message: ServerMessage::Frame(frame),
-            } => Some(frame),
+            Self::Semantic { frame, .. } => Some(frame),
             Self::TerminalAnsi { frame, .. } => Some(frame),
-            _ => None,
         }
     }
 }
@@ -306,6 +320,72 @@ pub(crate) fn render_virtual_with_runtime_registry(
     terminal
         .draw(|frame| {
             crate::ui::render_with_runtime_registry(app_state, terminal_runtimes, frame);
+        })
+        .expect("render to TestBackend should never fail");
+
+    let buffer = terminal.backend().buffer().clone();
+    let cursor = if suppress_focused_terminal_cursor {
+        None
+    } else {
+        focused_terminal_cursor(app_state, terminal_runtimes).or_else(|| {
+            (!focused_terminal_owns_host_cursor(app_state, terminal_runtimes))
+                .then(|| terminal.backend().rendered_cursor())
+                .flatten()
+        })
+    };
+
+    (buffer, cursor)
+}
+
+// Kept as the no-runtime-registry companion to `render_virtual`; production
+// streaming uses the runtime-registry variant, while tests and future callers
+// can render embedded content without constructing pane runtimes.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn render_embedded_content_virtual(
+    app_state: &mut AppState,
+    area: Rect,
+    resize_panes: bool,
+) -> (ratatui::buffer::Buffer, Option<CursorState>) {
+    let terminal_runtimes = TerminalRuntimeRegistry::new();
+    render_embedded_content_virtual_with_runtime_registry(
+        app_state,
+        &terminal_runtimes,
+        area,
+        resize_panes,
+        crate::kitty_graphics::HostCellSize::default(),
+    )
+}
+
+/// Renders the sidebar-less content column for embedded-content clients.
+pub(crate) fn render_embedded_content_virtual_with_runtime_registry(
+    app_state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) -> (ratatui::buffer::Buffer, Option<CursorState>) {
+    let pre_compute_suppresses_focused_terminal_cursor =
+        focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
+    crate::ui::compute_embedded_content_view_with_cell_size(
+        app_state,
+        terminal_runtimes,
+        area,
+        resize_panes,
+        cell_size,
+    );
+    let suppress_focused_terminal_cursor = pre_compute_suppresses_focused_terminal_cursor
+        || focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
+
+    let backend = CursorTrackingBackend::new(area.width, area.height);
+    let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
+
+    terminal
+        .draw(|frame| {
+            crate::ui::render_embedded_content_with_runtime_registry(
+                app_state,
+                terminal_runtimes,
+                frame,
+            );
         })
         .expect("render to TestBackend should never fail");
 

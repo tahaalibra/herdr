@@ -607,6 +607,7 @@ impl App {
             agent_panel_sort,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
+            sidebar_host: config.ui.sidebar.host.clone(),
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,
@@ -1239,6 +1240,18 @@ impl App {
         crate::app::input::open_settings_at(&mut self.state, state::SettingsSection::Integrations);
     }
 
+    /// Open the server-rendered settings UI, e.g. on behalf of an
+    /// embedded-content client that owns the menu surface.
+    pub(crate) fn open_settings(&mut self) {
+        crate::app::input::open_settings_at(&mut self.state, state::SettingsSection::Theme);
+    }
+
+    /// Open the server-rendered keybind help UI, e.g. on behalf of an
+    /// embedded-content client that owns the menu surface.
+    pub(crate) fn open_keybind_help(&mut self) {
+        crate::app::input::open_keybind_help(&mut self.state);
+    }
+
     pub(crate) fn refresh_integration_recommendations(&mut self) {
         self.state.integration_recommendations = crate::integration::integration_recommendations();
     }
@@ -1409,6 +1422,7 @@ impl App {
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
+                self.state.sidebar_host = config.ui.sidebar.host.clone();
                 self.state.agent_panel_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {

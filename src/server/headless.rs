@@ -2486,6 +2486,7 @@ impl HeadlessServer {
                 keybindings,
                 writer,
                 render_encoding,
+                surface_mode,
                 direct_attach_requested,
             } => {
                 if self.handoff_in_progress {
@@ -2509,27 +2510,27 @@ impl HeadlessServer {
                     cell_width_px,
                     cell_height_px,
                     ?render_encoding,
+                    ?surface_mode,
                     "client connected"
                 );
                 let last_activity = self.allocate_activity_stamp();
-                self.clients.insert(
-                    client_id,
-                    ClientConnection::new_with_mode(
-                        ClientConnectionMode::App,
-                        keybindings,
-                        (cols, rows),
-                        crate::kitty_graphics::HostCellSize {
-                            width_px: cell_width_px,
-                            height_px: cell_height_px,
-                        },
-                        crate::terminal_theme::TerminalTheme::default(),
-                        None,
-                        last_activity,
-                        render_encoding,
-                        direct_attach_requested,
-                        Some(writer),
-                    ),
+                let mut connection = ClientConnection::new_with_mode(
+                    ClientConnectionMode::App,
+                    keybindings,
+                    (cols, rows),
+                    crate::kitty_graphics::HostCellSize {
+                        width_px: cell_width_px,
+                        height_px: cell_height_px,
+                    },
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    last_activity,
+                    render_encoding,
+                    direct_attach_requested,
+                    Some(writer),
                 );
+                connection.surface_mode = surface_mode;
+                self.clients.insert(client_id, connection);
                 if !direct_attach_requested {
                     self.foreground_client_id = Some(client_id);
                 }
@@ -2723,6 +2724,22 @@ impl HeadlessServer {
                 self.send_terminal_stream_detach_shutdown(client_id);
                 self.remove_client_and_resize_if_needed(client_id);
                 true
+            }
+            ServerEvent::ClientOpenSettings { client_id } => {
+                self.promote_client_to_foreground(client_id);
+                self.app.open_settings();
+                true
+            }
+            ServerEvent::ClientOpenKeybindHelp { client_id } => {
+                self.promote_client_to_foreground(client_id);
+                self.app.open_keybind_help();
+                true
+            }
+            ServerEvent::ClientPing { client_id, nonce } => {
+                // Echo the latency probe so the client measures real round-trip
+                // time over the persistent stream. No re-render needed.
+                self.send_to_client(client_id, ServerMessage::Pong { nonce });
+                false
             }
             ServerEvent::ClientDisconnected { client_id } => {
                 info!(client_id, "client disconnected");
@@ -3139,13 +3156,18 @@ impl HeadlessServer {
         }
 
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
-        let [(client_id, (cols, rows), cell_size, _is_foreground, mode)] =
+        let [(client_id, (cols, rows), cell_size, _is_foreground, mode, surface_mode)] =
             render_targets.as_slice()
         else {
             retained_fallback!("multiple_or_no_target");
         };
         if !matches!(mode, ClientConnectionMode::App) {
             retained_fallback!("not_app_client");
+        }
+        // The retained fast path patches pane cells into the last full-app frame;
+        // embedded-content geometry is validated only for the full render path.
+        if !matches!(surface_mode, crate::protocol::ClientSurfaceMode::FullApp) {
+            retained_fallback!("embedded_content_surface");
         }
         let Some(client) = self.clients.get(client_id) else {
             retained_fallback!("client_missing");
@@ -3354,30 +3376,40 @@ impl HeadlessServer {
 
         let mut broken_clients: Vec<u64> = Vec::new();
         let mut deferred_frame = false;
-        for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
+        for (client_id, (cols, rows), cell_size, is_foreground, mode, surface_mode) in
+            render_targets
+        {
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
             let mut frame = match mode {
                 ClientConnectionMode::App => {
                     let render_started = crate::render_prof::timer();
-                    let (buffer, cursor) =
+                    let render_cell_size =
                         if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
-                            crate::server::render_stream::render_virtual_with_runtime_registry(
-                                &mut self.app.state,
-                                &self.app.terminal_runtimes,
-                                area,
-                                is_foreground,
-                                cell_size,
-                            )
+                            cell_size
                         } else {
+                            crate::kitty_graphics::HostCellSize::default()
+                        };
+                    let (buffer, cursor) = match surface_mode {
+                        crate::protocol::ClientSurfaceMode::FullApp => {
                             crate::server::render_stream::render_virtual_with_runtime_registry(
                                 &mut self.app.state,
                                 &self.app.terminal_runtimes,
                                 area,
                                 is_foreground,
-                                crate::kitty_graphics::HostCellSize::default(),
+                                render_cell_size,
                             )
-                        };
+                        }
+                        crate::protocol::ClientSurfaceMode::EmbeddedContent => {
+                            crate::server::render_stream::render_embedded_content_virtual_with_runtime_registry(
+                                &mut self.app.state,
+                                &self.app.terminal_runtimes,
+                                area,
+                                is_foreground,
+                                render_cell_size,
+                            )
+                        }
+                    };
                     crate::render_prof::duration_since(
                         "full_render.render_virtual",
                         render_started,
@@ -4242,8 +4274,21 @@ mod tests {
     }
 
     fn read_server_frame(bytes: Vec<u8>) -> FrameData {
-        match read_server_message(bytes) {
+        // Frames may arrive deflate-wrapped; inflate before matching.
+        match crate::protocol::decompress_server_message(read_server_message(bytes)) {
             ServerMessage::Frame(frame) => frame,
+            other => panic!("expected frame, got {other:?}"),
+        }
+    }
+
+    /// Like `read_server_frame`, but also reconstructs `FrameDelta` messages
+    /// against `baseline`, mirroring the real client.
+    fn read_server_frame_with_baseline(bytes: Vec<u8>, baseline: &FrameData) -> FrameData {
+        match crate::protocol::decompress_server_message(read_server_message(bytes)) {
+            ServerMessage::Frame(frame) => frame,
+            ServerMessage::FrameDelta(delta) => baseline
+                .with_delta(&delta)
+                .expect("frame delta should apply to its baseline"),
             other => panic!("expected frame, got {other:?}"),
         }
     }
@@ -4556,6 +4601,7 @@ new_tab = "prefix+t"
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: Some(Box::new(local_keybindings)),
             direct_attach_requested: false,
             writer: writer_a,
@@ -4580,6 +4626,7 @@ new_tab = "prefix+t"
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: None,
             direct_attach_requested: false,
             writer: writer_b,
@@ -4596,6 +4643,30 @@ new_tab = "prefix+t"
             .bindings
             .iter()
             .any(|binding| binding.label == "prefix+c"));
+    }
+
+    #[test]
+    fn connected_app_client_tracks_surface_mode() {
+        let mut server = test_headless_server();
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            surface_mode: crate::protocol::ClientSurfaceMode::EmbeddedContent,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+
+        assert_eq!(
+            server.clients[&1].surface_mode,
+            crate::protocol::ClientSurfaceMode::EmbeddedContent
+        );
     }
 
     #[test]
@@ -4620,6 +4691,7 @@ new_tab = "prefix+t"
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: Some(Box::new(local_keybindings)),
             direct_attach_requested: false,
             writer: writer_a,
@@ -4633,6 +4705,7 @@ new_tab = "prefix+t"
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: None,
             direct_attach_requested: false,
             writer: writer_b,
@@ -4676,6 +4749,7 @@ next_tab = ""
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: Some(Box::new(local_keybindings)),
             direct_attach_requested: false,
             writer,
@@ -4751,6 +4825,7 @@ next_tab = ""
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: Some(Box::new(local_config.live_keybinds().unwrap())),
             direct_attach_requested: false,
             writer: writer_a,
@@ -4771,6 +4846,7 @@ next_tab = ""
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: None,
             direct_attach_requested: false,
             writer: writer_b,
@@ -4805,6 +4881,7 @@ next_tab = ""
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: None,
             direct_attach_requested: true,
             writer,
@@ -4870,6 +4947,7 @@ next_tab = ""
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: None,
             direct_attach_requested: true,
             writer,
@@ -5172,6 +5250,7 @@ next_tab = ""
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: None,
             direct_attach_requested: false,
             writer,
@@ -5206,6 +5285,7 @@ next_tab = ""
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: None,
             direct_attach_requested: true,
             writer,
@@ -5239,6 +5319,7 @@ next_tab = ""
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: None,
             direct_attach_requested: false,
             writer,
@@ -5284,6 +5365,7 @@ next_tab = ""
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: None,
             direct_attach_requested: true,
             writer,
@@ -6848,6 +6930,7 @@ next_tab = ""
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
+            surface_mode: crate::protocol::ClientSurfaceMode::FullApp,
             keybindings: None,
             direct_attach_requested: true,
             writer,
@@ -7084,9 +7167,13 @@ next_tab = ""
         server.render_and_stream();
 
         assert!(!server.clients.get(&1).unwrap().render_pending);
+        // The re-render may stream as a full frame or a delta, possibly
+        // deflate-wrapped; both prove the pending render was flushed.
         assert!(matches!(
-            read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
-            ServerMessage::Frame(_)
+            crate::protocol::decompress_server_message(read_server_message(
+                client_rx.recv_timeout(Duration::from_millis(100)).unwrap()
+            )),
+            ServerMessage::Frame(_) | ServerMessage::FrameDelta(_)
         ));
     }
 
@@ -7319,10 +7406,11 @@ next_tab = ""
         runtime.test_process_pty_bytes(b"\rZ");
 
         assert!(server.render_retained_pty_update_and_stream());
-        let patched = read_server_frame(
+        let patched = read_server_frame_with_baseline(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("retained frame"),
+            &first,
         );
         assert!(patched.cells.iter().any(|cell| cell.symbol == "Z"));
         assert_eq!((patched.width, patched.height), (80, 24));
@@ -7420,13 +7508,17 @@ next_tab = ""
         let (mut full_server, full_rx, full_pane_id) = retained_test_server(initial);
 
         retained_server.render_and_stream();
-        let _ = retained_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("initial retained baseline");
+        let retained_baseline = read_server_frame(
+            retained_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial retained baseline"),
+        );
         full_server.render_and_stream();
-        let _ = full_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("initial full baseline");
+        let full_baseline = read_server_frame(
+            full_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial full baseline"),
+        );
 
         retained_server
             .app
@@ -7448,15 +7540,17 @@ next_tab = ""
         assert!(retained_server.render_retained_pty_update_and_stream());
         full_server.render_and_stream();
 
-        let retained_frame = read_server_frame(
+        let retained_frame = read_server_frame_with_baseline(
             retained_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("retained frame"),
+            &retained_baseline,
         );
-        let full_frame = read_server_frame(
+        let full_frame = read_server_frame_with_baseline(
             full_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("full frame"),
+            &full_baseline,
         );
         assert_frame_data_eq(&retained_frame, &full_frame);
     }
@@ -7469,13 +7563,17 @@ next_tab = ""
         let (mut full_server, full_rx, full_pane_id) = retained_test_server(initial);
 
         retained_server.render_and_stream();
-        let _ = retained_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("initial retained baseline");
+        let retained_baseline = read_server_frame(
+            retained_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial retained baseline"),
+        );
         full_server.render_and_stream();
-        let _ = full_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("initial full baseline");
+        let full_baseline = read_server_frame(
+            full_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial full baseline"),
+        );
 
         retained_server
             .app
@@ -7497,15 +7595,17 @@ next_tab = ""
         assert!(retained_server.render_retained_pty_update_and_stream());
         full_server.render_and_stream();
 
-        let retained_frame = read_server_frame(
+        let retained_frame = read_server_frame_with_baseline(
             retained_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("retained cursor frame"),
+            &retained_baseline,
         );
-        let full_frame = read_server_frame(
+        let full_frame = read_server_frame_with_baseline(
             full_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("full cursor frame"),
+            &full_baseline,
         );
         assert_frame_data_eq(&retained_frame, &full_frame);
     }
@@ -7514,9 +7614,11 @@ next_tab = ""
     async fn retained_pty_update_declines_unsafe_mode_without_consuming_dirty_rows() {
         let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
         server.render_and_stream();
-        let _ = client_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("initial frame");
+        let initial_frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial frame"),
+        );
 
         let runtime = server
             .app
@@ -7531,10 +7633,11 @@ next_tab = ""
 
         server.app.state.mode = crate::app::Mode::Terminal;
         assert!(server.render_retained_pty_update_and_stream());
-        let patched = read_server_frame(
+        let patched = read_server_frame_with_baseline(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("retained frame after safe mode"),
+            &initial_frame,
         );
         assert!(patched.cells.iter().any(|cell| cell.symbol == "Z"));
     }
@@ -7564,9 +7667,11 @@ next_tab = ""
     async fn retained_pty_update_declines_when_patch_would_stale_hyperlinks() {
         let (mut server, client_rx, pane_id) = retained_test_server(b"link");
         server.render_and_stream();
-        let _ = client_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("initial frame");
+        let initial_frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial frame"),
+        );
         let inner_rect = server.app.state.view.pane_infos[0].inner_rect;
         let client = server.clients.get_mut(&1).unwrap();
         let mut frame = client.render_state.last_frame().unwrap().clone();
@@ -7591,10 +7696,11 @@ next_tab = ""
         assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
 
         server.render_and_stream();
-        let full = read_server_frame(
+        let full = read_server_frame_with_baseline(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("full frame after hyperlink overwrite"),
+            &initial_frame,
         );
         assert!(
             full.cells.iter().all(|cell| cell.hyperlink.is_none()),
@@ -7606,9 +7712,11 @@ next_tab = ""
     async fn retained_pty_update_allows_dirty_row_that_creates_plain_url() {
         let (mut server, client_rx, pane_id) = retained_test_server(b"plain");
         server.render_and_stream();
-        let _ = client_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("initial frame");
+        let initial_frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial frame"),
+        );
 
         let runtime = server
             .app
@@ -7618,10 +7726,11 @@ next_tab = ""
         runtime.test_process_pty_bytes(b"\rhttps://example.com/new");
 
         assert!(server.render_retained_pty_update_and_stream());
-        let patched = read_server_frame(
+        let patched = read_server_frame_with_baseline(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("retained frame after plain URL"),
+            &initial_frame,
         );
         assert!(
             patched.hyperlinks.is_empty(),
@@ -7639,9 +7748,11 @@ next_tab = ""
         };
 
         server.render_and_stream();
-        let _ = client_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("initial frame");
+        let initial_frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial frame"),
+        );
 
         let runtime = server
             .app
@@ -7651,10 +7762,11 @@ next_tab = ""
         runtime.test_process_pty_bytes(b"\rZ");
 
         assert!(server.render_retained_pty_update_and_stream());
-        let retained = read_server_frame(
+        let retained = read_server_frame_with_baseline(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("retained frame with kitty enabled"),
+            &initial_frame,
         );
         assert!(retained.cells.iter().any(|cell| cell.symbol == "Z"));
     }

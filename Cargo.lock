@@ -594,6 +594,7 @@ dependencies = [
  "ctrlc",
  "interprocess",
  "libc",
+ "miniz_oxide",
  "png",
  "portable-pty",
  "ratatui",

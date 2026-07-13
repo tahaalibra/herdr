@@ -46,6 +46,8 @@ pub struct WorkspaceInfo {
     pub workspace_id: String,
     pub number: usize,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub focused: bool,
     pub pane_count: usize,
     pub tab_count: usize,
