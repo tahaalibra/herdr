@@ -58,10 +58,16 @@ fn main() {
         .to_string();
 
     let zig = env::var("ZIG").unwrap_or_else(|_| "zig".into());
+    // Emit into a per-target prefix: building several targets from one checkout
+    // (e.g. a release cross-build next to the host test build) must not clobber
+    // another target's archive in a shared zig-out/lib.
+    let out_prefix = vendored_dir.join("zig-out").join(&target);
     let mut command = Command::new(zig);
     command
         .arg("build")
         .arg("-Demit-lib-vt")
+        .arg("--prefix")
+        .arg(&out_prefix)
         .arg(format!("-Doptimize={optimize}"))
         .arg(format!("-Dsimd={simd}"))
         .arg(format!("-Dtarget={zig_target}"))
@@ -80,7 +86,7 @@ fn main() {
         "zig build for vendored libghostty-vt failed: {status}"
     );
 
-    let lib_dir = vendored_dir.join("zig-out/lib");
+    let lib_dir = out_prefix.join("lib");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     if target.contains("apple-darwin") {
         let static_lib = lib_dir.join("libghostty-vt.a");
