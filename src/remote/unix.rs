@@ -327,15 +327,14 @@ impl std::fmt::Display for RestartConfirmNeeded {
 impl std::error::Error for RestartConfirmNeeded {}
 
 /// If `err` carries a [`RestartConfirmNeeded`] signal, borrow it.
-// Consumed by the client-supervisor phase, which turns the signal into a restart prompt.
-#[allow(dead_code)]
 pub(crate) fn restart_confirm_needed(err: &io::Error) -> Option<&RestartConfirmNeeded> {
     err.get_ref()
         .and_then(|inner| inner.downcast_ref::<RestartConfirmNeeded>())
 }
 
-// Entry point for the client-supervisor phase (in-client attach to additional remotes).
-#[allow(dead_code)]
+/// Start (or reuse) the ssh bridge for one remote so the client can attach its
+/// client + API streams. The returned bridge must be kept alive for the
+/// connection's lifetime.
 pub(crate) fn start_ssh_remote_bridge(
     target: SshTarget,
     restart_incompatible: bool,

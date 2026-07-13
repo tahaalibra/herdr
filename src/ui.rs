@@ -52,7 +52,7 @@ pub(crate) use self::scrollbar::{
 };
 use self::settings::render_settings_overlay;
 pub(crate) use self::sidebar::render_sidebar;
-use self::sidebar::render_sidebar_collapsed;
+pub(crate) use self::sidebar::render_sidebar_collapsed;
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
     toast_notification_rect,
@@ -81,28 +81,32 @@ pub(crate) use self::{
         HostBannerArea, WorkspaceListEntry,
     },
 };
-// Staged re-exports for the client compositor phase: the compositor renders the client
-// overlays and hit-tests through these; nothing else consumes them via `crate::ui::` in
-// non-test builds yet. Remove the allow when the compositor lands.
-#[allow(unused_imports)]
-pub(crate) use self::{
-    dialogs::{
-        add_remote_button_rects, add_remote_inner_rect, add_remote_popup_rect,
-        confirm_close_workspace_button_rects, confirm_close_workspace_popup_rect,
-        new_workspace_picker_button_rects, new_workspace_picker_inner_rect,
-        new_workspace_picker_popup_rect, new_workspace_picker_row_rect,
-        remote_manage_confirm_button_rects, remote_manage_confirm_popup_rect,
-        remote_manage_inner_rect, remote_manage_popup_rect, remote_manage_row_rect,
-        rename_workspace_button_rects, rename_workspace_inner_rect, rename_workspace_popup_rect,
-        render_add_remote_overlay, render_confirm_close_workspace_overlay,
-        render_new_workspace_picker_overlay, render_remote_manage_overlay,
-        render_rename_workspace_overlay, render_workspace_context_menu_overlay,
-        workspace_context_menu_inner_rect, workspace_context_menu_popup_rect,
-        workspace_context_menu_row_rect, AddRemoteOverlayView, DestinationView,
-        RemoteManageRowView, RemoteStateGlyph, WorkspaceContextMenuView,
-    },
-    sidebar::{compute_workspace_list_areas_full, host_drop_indicator_row},
+// The client compositor (unix-only) renders the client overlays and hit-tests
+// through these; Windows builds have no consumer.
+#[cfg(unix)]
+pub(crate) use self::dialogs::{
+    add_remote_button_rects, add_remote_inner_rect, add_remote_popup_rect,
+    confirm_close_workspace_button_rects, confirm_close_workspace_popup_rect,
+    new_workspace_picker_button_rects, new_workspace_picker_inner_rect,
+    new_workspace_picker_popup_rect, new_workspace_picker_row_rect,
+    remote_manage_confirm_button_rects, remote_manage_confirm_popup_rect, remote_manage_inner_rect,
+    remote_manage_popup_rect, remote_manage_row_rect, rename_workspace_button_rects,
+    rename_workspace_inner_rect, rename_workspace_popup_rect, render_add_remote_overlay,
+    render_confirm_close_workspace_overlay, render_new_workspace_picker_overlay,
+    render_remote_manage_overlay, render_rename_workspace_overlay,
+    render_workspace_context_menu_overlay, workspace_context_menu_inner_rect,
+    workspace_context_menu_popup_rect, workspace_context_menu_row_rect, AddRemoteOverlayView,
+    DestinationView, RemoteManageRowView, RemoteStateGlyph, WorkspaceContextMenuView,
 };
+// Consumed by the unix-only client compositor in normal builds and by
+// cross-platform sidebar geometry tests; Windows non-test builds have no user.
+#[cfg_attr(not(unix), allow(unused_imports))]
+pub(crate) use self::sidebar::compute_workspace_list_areas_full;
+// Non-test code reaches the host drop indicator through `render_workspace_list`
+// inside `ui::sidebar`; only the client compositor's geometry tests consume it
+// through `crate::ui::`.
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use self::sidebar::host_drop_indicator_row;
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
     mobile::{
@@ -124,7 +128,7 @@ const SPINNERS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 /// Map spinner_tick (incremented every frame at ~60fps) to a spinner frame.
 /// We want ~8 updates/sec so divide by 8.
-pub(super) fn spinner_frame(tick: u32) -> &'static str {
+pub(crate) fn spinner_frame(tick: u32) -> &'static str {
     SPINNERS[(tick as usize / 8) % SPINNERS.len()]
 }
 

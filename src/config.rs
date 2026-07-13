@@ -35,8 +35,9 @@ pub use self::{
 
 pub(crate) use self::io::upsert_top_level_bool;
 pub(crate) use self::keybinds::parse_key_combo;
-// Named only by tests today (non-test code reaches the speed through the
-// `SidebarHostConfig` field); keep the export for the client compositor phase.
+// Named only by tests (settings/banner fixtures); non-test code reaches the
+// speed through the `SidebarHostConfig` field, and the client compositor reads
+// the whole config struct rather than the enum by name.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub use self::sidebar::HostBannerSpeed;
 

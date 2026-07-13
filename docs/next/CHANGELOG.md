@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added mixed remote server support (unix): the thin client can manage secondary local or SSH-backed Herdr servers from a client-rendered sidebar, persist the remote registry on the main server, show combined workspace and agent summaries with per-host banners, route workspace creation/focus/rename/close to the selected server, and keep secondary disconnects isolated from the main session.
 - Added Grok Build integration support with native session restore via `herdr integration install grok`.
 - Copy mode now supports literal smart-case search with `/` and `?`, repeating with `n` and `N`, match highlighting, and tmux-style cross-line `w`/`b`/`e` word motions. (#1230)
 - Added maki detection with idle, working, and blocked screen states. (#1301, thanks @tontinton)

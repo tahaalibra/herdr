@@ -6,8 +6,8 @@ pub(crate) use unix::*;
 
 #[cfg(windows)]
 pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
-#[cfg(windows)]
-pub(crate) const MAIN_DISPLAY_NAME_ENV_VAR: &str = "HERDR_MAIN_DISPLAY_NAME";
+// The main-display-name / main-remote-target launch env vars are only read by
+// the unix-only mixed-server client; `src/remote/unix.rs` owns them there.
 #[cfg(windows)]
 pub(crate) const MAIN_REMOTE_TARGET_ENV_VAR: &str = "HERDR_MAIN_REMOTE_TARGET";
 #[cfg(windows)]

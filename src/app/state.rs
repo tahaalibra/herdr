@@ -617,18 +617,22 @@ pub struct HostBannerSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostBannerState {
     Connected,
+    // The non-Connected variants are constructed by the unix-only client
+    // supervisor's connection-state projection; the shared sidebar renderer
+    // only matches them, so Windows never builds a constructor.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Connecting,
+    #[cfg_attr(not(unix), allow(dead_code))]
     Disconnected,
+    #[cfg_attr(not(unix), allow(dead_code))]
     ProtocolMismatch,
+    #[cfg_attr(not(unix), allow(dead_code))]
     Disabled,
 }
 
 /// Sidebar hover target. The agent variant is route-index keyed for the
 /// client path (route_idx survives recompose; pane_id does not) and pane_id keyed
 /// for the monolithic path (terminals are stable there).
-// The route/destination variants are constructed by the client compositor
-// hover path (next phase); the monolithic hover path fills the rest.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarHoverTarget {
     Workspace {
@@ -639,13 +643,23 @@ pub(crate) enum SidebarHoverTarget {
         tab_idx: usize,
         pane_id: crate::layout::PaneId,
     },
+    // Constructed by the unix-only client compositor hover path; the shared
+    // renderer only matches it, so Windows never builds a constructor.
+    #[cfg_attr(not(unix), allow(dead_code))]
     AgentRoute {
         route_idx: usize,
     },
     New,
     Menu,
     ScopeToggle,
+    // Constructed by the unix-only client compositor hover path (the filter
+    // pill); the shared renderer only matches it, so Windows never builds a
+    // constructor.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Filter,
+    // Constructed by the unix-only client compositor hover path (the
+    // new-workspace picker rows); Windows never builds a constructor.
+    #[cfg_attr(not(unix), allow(dead_code))]
     NewWorkspaceDestination {
         row: u16,
     },
@@ -1145,9 +1159,9 @@ pub(crate) enum DragTarget {
     /// `source_host_idx`/`insert_idx` index the ORDERED host/banner list (the visible-server
     /// order). Client-local; the drop indicator is drawn only at host boundaries (banner rows
     /// or the end of the list), never between two spaces.
-    // Constructed only by the client compositor drag path (next phase); render/tests
-    // already consume it, so the shape lands first.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Constructed only by the unix-only client compositor drag path; the shared
+    // renderer only matches it, so Windows never builds a constructor.
+    #[cfg_attr(not(unix), allow(dead_code))]
     HostReorder {
         source_host_idx: usize,
         insert_idx: Option<usize>,
@@ -1549,24 +1563,16 @@ pub struct AppState {
     /// Frame counter for spinner animations (wraps around).
     pub spinner_tick: u32,
     /// Per-workspace local/remote flag, index-aligned with `workspaces`; empty in monolithic.
-    // These staged multi-server fields are read once the compositor wiring
-    // lands; the shared shapes exist first so state, input, and render land
-    // in slices.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) client_workspace_remote: Vec<bool>,
     /// One per host banner entry; empty in monolithic.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub host_banners: Vec<HostBannerSpec>,
     /// Index-aligned with `host_banners`; each value is the `ws_idx` of the remote
     /// host group's first workspace, i.e. the workspace the banner is emitted immediately
     /// before. Empty in monolithic.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) host_banner_rows: Vec<usize>,
     /// Divider labeled/plain coordination flag; false in monolithic.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) host_banner_active: bool,
     /// Current sidebar hover target.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) sidebar_hover: Option<SidebarHoverTarget>,
     /// UI color palette — all sidebar/UI colors centralized for theming.
     pub palette: Palette,
@@ -1801,10 +1807,16 @@ pub fn key_matches(
 // Test helpers
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
 impl AppState {
-    /// Create an AppState for testing — no channels, no PTYs.
-    pub fn test_new() -> Self {
+    /// Create an AppState for client-side shell rendering — no channels, no PTYs.
+    ///
+    /// The client compositor projects the multi-server supervisor model into
+    /// this display-only state so the shared sidebar renderer and geometry
+    /// helpers can run without a local runtime.
+    // The only non-test caller is the unix-only client compositor; on Windows
+    // it is reached solely through `test_new()` under `#[cfg(test)]`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn empty_for_client_rendering() -> Self {
         Self {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
@@ -1973,6 +1985,14 @@ impl AppState {
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+impl AppState {
+    /// Create an AppState for testing — no channels, no PTYs.
+    pub fn test_new() -> Self {
+        Self::empty_for_client_rendering()
     }
 
     /// Populate missing `TerminalState` entries for every pane so tests that

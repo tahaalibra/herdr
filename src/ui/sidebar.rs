@@ -1039,7 +1039,7 @@ pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect
 }
 
 /// Collapsed sidebar: workspace glance on top, compact agent list below.
-pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
+pub(crate) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }

@@ -189,8 +189,9 @@ impl Workspace {
     /// client compositor uses these placeholders so the SHARED sidebar renderer can draw remote
     /// workspaces without a local runtime. Returns the created pane ids in `pane_terminals`
     /// order so the caller can map them back to remote panes.
-    // Constructed by the client compositor (next phase); shape + tests land first.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // The placeholder constructor is consumed by the unix-only client
+    // compositor; Windows builds keep the shape (and its unit tests) unused.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn sidebar_placeholder(
         id: String,
         name: String,

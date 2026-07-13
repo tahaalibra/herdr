@@ -1141,6 +1141,62 @@ mod tests {
         server_thread.join().unwrap();
     }
 
+    // The all-pane subscription form (`pane_id: None`) the multi-server client uses for its
+    // sidebar summary refresh must stream every pane's status-change envelope.
+    #[test]
+    fn all_agent_status_subscription_streams_matching_event_envelope() {
+        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        // Keep this socket name short: unique_test_path builds
+        // `<tmp>/herdr-<name>-<pid>-<nanos>` and macOS sun_path caps at 104 bytes.
+        let (mut client, server, _path) = local_stream_pair("sub-all-status");
+        client
+            .write_all(
+                br#"{"id":"sub_all","method":"events.subscribe","params":{"subscriptions":[{"type":"pane.agent_status_changed"}]}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let server_event_hub = event_hub.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result =
+                handle_connection(server, &api_tx, &server_event_hub, &server_running, None);
+            done_tx.send(result).unwrap();
+        });
+
+        let ack = read_line(&mut client);
+        let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack["result"]["type"], "subscription_started");
+
+        event_hub.push(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::PaneAgentStatusChanged,
+            data: crate::api::schema::EventData::PaneAgentStatusChanged {
+                pane_id: "pane_1".into(),
+                workspace_id: "workspace_1".into(),
+                agent_status: crate::api::schema::AgentStatus::Working,
+                agent: Some("pi".into()),
+                title: None,
+                display_agent: None,
+                state_labels: std::collections::HashMap::new(),
+            },
+        });
+
+        let event = read_line(&mut client);
+        let event: serde_json::Value = serde_json::from_str(&event).unwrap();
+        assert_eq!(event["event"], "pane_agent_status_changed");
+        assert_eq!(event["data"]["pane_id"], "pane_1");
+
+        running.store(false, Ordering::Relaxed);
+        drop(client);
+        let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_ok());
+        server_thread.join().unwrap();
+    }
+
     #[test]
     fn subscriptions_stop_when_server_shuts_down() {
         let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();

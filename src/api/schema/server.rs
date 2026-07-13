@@ -51,9 +51,9 @@ impl Default for UiSettingsInfo {
 }
 
 impl UiSettingsInfo {
-    // Consumed by the client compositor once the unified sidebar wiring
-    // lands; until then only tests exercise the clamp.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Consumed by the unix-only client compositor; Windows builds only
+    // exercise the clamp from tests.
+    #[cfg_attr(all(not(unix), not(test)), allow(dead_code))]
     pub(crate) fn sidebar_section_split(&self) -> f32 {
         (self.sidebar_section_split_per_mille as f32 / 1000.0).clamp(0.1, 0.9)
     }

@@ -1,14 +1,3 @@
-// This model is being wired into the thin client in vertical slices. Some
-// routing and sidebar methods are test-covered before the real client-owned UI
-// calls them, so the non-test binary temporarily sees them as unused.
-#![cfg_attr(not(test), allow(dead_code))]
-// Until the compositor/client wiring phase lands, a few API-facing entry points
-// (e.g. `fetch_server_summary_from_api_target`, overlay render accessors) are
-// not called from unit tests either, so the test build needs the same allowance.
-// Remove this together with the attribute above once the client event loop
-// consumes the supervisor.
-#![cfg_attr(test, allow(dead_code))]
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ServerId(String);
 
@@ -636,10 +625,16 @@ impl ClientSupervisorModel {
         self.reconcile_new_workspace_picker();
     }
 
+    // The client dispatch drives the filter through `cycle_filter`/`filter_label`;
+    // only tests read the raw filter state back.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn filter(&self) -> &ServerFilter {
         &self.filter
     }
 
+    // The client dispatch only cycles the filter (`cycle_filter`); direct filter
+    // assignment is exercised by tests until a filter picker UI needs it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_filter(&mut self, filter: ServerFilter) {
         self.close_new_workspace_picker();
         self.filter = match filter {
@@ -686,6 +681,10 @@ impl ClientSupervisorModel {
         &self.active_server_id
     }
 
+    // The client switches the active server through the focus routes
+    // (`focus_workspace_route`/`focus_agent_route`) and `activate_main_server`;
+    // direct activation is exercised by tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_active_server(&mut self, id: ServerId) -> Result<(), ()> {
         if self.server(&id).is_none() {
             return Err(());
@@ -830,6 +829,10 @@ impl ClientSupervisorModel {
             .collect()
     }
 
+    // The client refreshes secondaries off the UI loop
+    // (`start_secondary_supervisor_summary_refreshes` + `apply_secondary_summary_results`);
+    // this synchronous fan-out variant is exercised by tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn refresh_secondary_summaries(
         &mut self,
         mut fetch: impl FnMut(&SecondaryConnectionPlan) -> Result<ServerSummary, ConnectionState>,
@@ -915,6 +918,9 @@ impl ClientSupervisorModel {
         self.new_workspace_picker.as_ref()
     }
 
+    // The compositor snapshot reads the picker state struct directly
+    // (`new_workspace_picker().destinations`); only tests use this projection.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new_workspace_picker_destinations(&self) -> Option<&[ServerDestination]> {
         self.new_workspace_picker
             .as_ref()

@@ -46,8 +46,9 @@ pub(crate) struct DestinationView<'a> {
 /// ui-owned glyph for a remote's state in the management overlay. This is a ui-local enum, NOT
 /// the supervisor `ConnectionState` (the one-way layering rule). The compositor maps the
 /// supervisor row state into this before calling `render_remote_manage_overlay`.
-// Constructed by the client compositor (next phase) and by geometry tests.
-#[cfg_attr(not(test), allow(dead_code))]
+// Constructed by the unix-only client compositor (and geometry tests); the
+// Windows binary never renders the client overlays.
+#[cfg_attr(all(not(unix), not(test)), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RemoteStateGlyph {
     Connected,
@@ -930,9 +931,9 @@ pub(crate) fn new_workspace_picker_button_rects(inner: Rect) -> (Rect, Rect) {
 /// `render_rename_overlay` (accent border, bold header, focused-field fill + cursor block, red
 /// inline error, centered action buttons). Cursor stays hidden — the caller forces
 /// `frame.cursor = None` while a modal is open.
-// Called by the client compositor once the compositor phase lands; the geometry
-// helpers above are its hit-test twins and are already test-covered.
-#[allow(dead_code)]
+// Rendered by the unix-only client compositor; Windows builds keep only the
+// test-covered geometry twins above.
+#[cfg_attr(all(not(unix), not(test)), allow(dead_code))]
 pub(crate) fn render_add_remote_overlay(
     palette: &Palette,
     view: &AddRemoteOverlayView,
@@ -1069,8 +1070,8 @@ fn render_add_remote_field(
 /// `render_open_existing_worktree_overlay` pattern), a `create on` sub-label, and centered
 /// create/cancel buttons. Geometry comes from `new_workspace_picker_inner_rect`/`_row_rect` so it
 /// matches `hit_test`.
-// Called by the client compositor once the compositor phase lands.
-#[allow(dead_code)]
+// Rendered by the unix-only client compositor; Windows never draws it.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn render_new_workspace_picker_overlay(
     palette: &Palette,
     destinations: &[DestinationView],
@@ -1226,8 +1227,8 @@ pub(crate) fn remote_manage_confirm_button_rects(inner: Rect) -> (Rect, Rect) {
 /// `render_panel_shell` popup with delete/cancel buttons. Geometry comes from
 /// `remote_manage_inner_rect`/`_row_rect`/`_confirm_*` so it matches `hit_test`. Square corners
 /// (`border::PLAIN`). The caller forces `frame.cursor = None` while the modal is open.
-// Called by the client compositor once the compositor phase lands.
-#[allow(dead_code)]
+// Rendered by the unix-only client compositor; Windows never draws it.
+#[cfg_attr(all(not(unix), not(test)), allow(dead_code))]
 pub(crate) fn render_remote_manage_overlay(
     palette: &Palette,
     rows: &[RemoteManageRowView],
@@ -1493,8 +1494,8 @@ pub(crate) fn confirm_close_workspace_button_rects(inner: Rect) -> (Rect, Rect) 
 /// menu items with the workspace name as a sub-header. Geometry comes from
 /// `workspace_context_menu_inner_rect`/`_row_rect` so it matches `hit_test`. Mirrors
 /// `render_new_workspace_picker_overlay`.
-// Called by the client compositor once the compositor phase lands.
-#[allow(dead_code)]
+// Rendered by the unix-only client compositor; Windows never draws it.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn render_workspace_context_menu_overlay(
     palette: &Palette,
     view: &WorkspaceContextMenuView,
@@ -1557,8 +1558,8 @@ pub(crate) fn render_workspace_context_menu_overlay(
 /// Render the rename text overlay as a footer-anchored accent panel with a single focused text
 /// field + save/cancel buttons. Mirrors `render_add_remote_overlay`. The caller forces
 /// `frame.cursor = None` while the modal is open.
-// Called by the client compositor once the compositor phase lands.
-#[allow(dead_code)]
+// Rendered by the unix-only client compositor; Windows never draws it.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn render_rename_workspace_overlay(
     palette: &Palette,
     label: &str,
@@ -1624,8 +1625,8 @@ pub(crate) fn render_rename_workspace_overlay(
 
 /// Render the close-confirm overlay as a centered red panel ("Close <label>?") with close/cancel
 /// buttons. Mirrors `render_remote_manage_confirm`.
-// Called by the client compositor once the compositor phase lands.
-#[allow(dead_code)]
+// Rendered by the unix-only client compositor; Windows never draws it.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn render_confirm_close_workspace_overlay(
     palette: &Palette,
     label: &str,
