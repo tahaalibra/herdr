@@ -356,6 +356,20 @@ Each sidebar layout may contain at most 16 rows, with at most 16 tokens in each 
 
 Agent built-ins are `state_icon`, `state_text`, `workspace`, `tab`, `pane`, `agent`, `terminal_title`, and `terminal_title_stripped`. The two terminal-title built-ins are optional and do not appear in the default rows. `terminal_title` is the latest OSC 0/2 terminal title after safety normalization. `terminal_title_stripped` additionally removes one recognized leading activity or spinner glyph and following whitespace. Space built-ins are `state_icon`, `state_text`, `workspace`, `branch`, and `git_status`. Names beginning with `$` read arbitrary display metadata reported by scripts or plugins. Missing values and their separators disappear, and empty rows collapse. Layout remains user-owned: metadata reporters cannot choose rows or styling. These settings affect only the expanded desktop sidebar; collapsed and mobile views remain compact.
 
+When several servers are registered, the sidebar draws a banner row above each remote host's spaces. `[ui.sidebar.host]` styles those banners:
+
+```toml
+[ui.sidebar.host]
+gradient = "solid"
+animation = "animated"
+speed = "calm"
+glyph = "left"
+show_count = false
+show_metrics = false
+```
+
+`gradient` colors the host name. The default, `solid`, uses one flat theme accent color with no shading or animation. The shaded presets are `rainbow`, `accent`, `cool`, `warm`, and `muted`; for those, `animation` (`animated` or `static`) and `speed` (`calm`, `normal`, or `lively`) control the gradient movement. `glyph` places the connection-state marker to the `left` of the name or hides it with `none`. `show_count` appends the host's space count to connected banners. `show_metrics` shows a live latency and download-rate readout at the banner's right edge; it is off by default. Unknown values fall back to the documented defaults instead of failing the config. All six options are also editable live from the settings "sidebar" section, which persists changes back to this table.
+
 `confirm_close` controls whether closing a workspace asks for confirmation. `prompt_new_tab_name` controls whether new tabs ask for a label first.
 
 Set `mouse_capture = false` if you want your terminal to handle normal clicks, such as command-clicking URLs. With mouse capture enabled, Ctrl-click opens pane links when your terminal sends that modified click to Herdr. This includes macOS; Cmd-click is not reported separately from plain click while Herdr captures mouse input. Use Shift-Ctrl-click on Linux or Shift-Cmd-click on macOS for the terminal-native bypass path.
