@@ -1835,6 +1835,50 @@ impl ClientSupervisorModel {
         route
     }
 
+    /// Optimistically merge a just-created workspace (from the create
+    /// response's `WorkspaceInfo`) into `server_id`'s summaries, so the new
+    /// space appears in the sidebar in the same frame instead of after a
+    /// full summary round-trip over the (possibly ssh-bridged) API. The
+    /// created workspace is focused server-side (`focus: true`), so it takes
+    /// the server's focus flag here too; the next real refresh reconciles.
+    pub(crate) fn apply_created_workspace(
+        &mut self,
+        server_id: &ServerId,
+        workspace: crate::api::schema::WorkspaceInfo,
+    ) {
+        let Some(server) = self
+            .servers
+            .iter_mut()
+            .find(|server| &server.id == server_id)
+        else {
+            return;
+        };
+        let summary = WorkspaceSummary {
+            workspace_id: workspace.workspace_id,
+            label: workspace.label,
+            branch: workspace.branch,
+            focused: true,
+            worktree_key: workspace.worktree.as_ref().map(|w| w.repo_key.clone()),
+            worktree_is_linked: workspace
+                .worktree
+                .as_ref()
+                .is_some_and(|w| w.is_linked_worktree),
+        };
+        for existing in &mut server.summaries.workspaces {
+            existing.focused = false;
+        }
+        if let Some(existing) = server
+            .summaries
+            .workspaces
+            .iter_mut()
+            .find(|existing| existing.workspace_id == summary.workspace_id)
+        {
+            *existing = summary;
+        } else {
+            server.summaries.workspaces.push(summary);
+        }
+    }
+
     pub(crate) fn focus_workspace_route(
         &mut self,
         server_id: &ServerId,
@@ -3859,6 +3903,100 @@ mod tests {
                     focused: true,
                 }],
             }]
+        );
+    }
+
+    #[test]
+    fn apply_created_workspace_echoes_into_summaries_and_takes_focus() {
+        let mut model = ClientSupervisorModel::new("local");
+        let remote_id = ServerId::secondary("remote-x");
+        model.add_secondary(crate::remote_registry::RemoteDefinitionSnapshot {
+            id: "remote-x".into(),
+            name: "x".into(),
+            target: crate::remote_registry::RemoteTargetSnapshot::Local {
+                session: Some("x".into()),
+            },
+            session: None,
+            keybindings: crate::remote_registry::RemoteKeybindingsSnapshot::Local,
+            disabled: false,
+        });
+        model
+            .set_summary(
+                &remote_id,
+                ServerSummary {
+                    workspaces: vec![WorkspaceSummary {
+                        workspace_id: "existing".into(),
+                        label: "api".into(),
+                        branch: None,
+                        focused: true,
+                        ..Default::default()
+                    }],
+                    agents: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        model.apply_created_workspace(
+            &remote_id,
+            crate::api::schema::WorkspaceInfo {
+                workspace_id: "fresh".into(),
+                number: 2,
+                label: "fresh-space".into(),
+                branch: Some("main".into()),
+                focused: true,
+                pane_count: 1,
+                tab_count: 1,
+                active_tab_id: "fresh:t1".into(),
+                agent_status: crate::api::schema::AgentStatus::Unknown,
+                tokens: std::collections::HashMap::new(),
+                worktree: None,
+            },
+        );
+
+        let server = model.server_for_test(&remote_id).expect("remote present");
+        let fresh = server
+            .summaries
+            .workspaces
+            .iter()
+            .find(|ws| ws.workspace_id == "fresh")
+            .expect("created workspace echoed into summaries");
+        assert_eq!(fresh.label, "fresh-space");
+        assert_eq!(fresh.branch.as_deref(), Some("main"));
+        assert!(fresh.focused, "create is focus:true, echo takes focus");
+        let existing = server
+            .summaries
+            .workspaces
+            .iter()
+            .find(|ws| ws.workspace_id == "existing")
+            .expect("existing workspace kept");
+        assert!(!existing.focused, "previous focus cleared");
+
+        // Applying the same create twice (event + response race) stays idempotent.
+        model.apply_created_workspace(
+            &remote_id,
+            crate::api::schema::WorkspaceInfo {
+                workspace_id: "fresh".into(),
+                number: 2,
+                label: "fresh-space".into(),
+                branch: Some("main".into()),
+                focused: true,
+                pane_count: 1,
+                tab_count: 1,
+                active_tab_id: "fresh:t1".into(),
+                agent_status: crate::api::schema::AgentStatus::Unknown,
+                tokens: std::collections::HashMap::new(),
+                worktree: None,
+            },
+        );
+        let server = model.server_for_test(&remote_id).expect("remote present");
+        assert_eq!(
+            server
+                .summaries
+                .workspaces
+                .iter()
+                .filter(|ws| ws.workspace_id == "fresh")
+                .count(),
+            1
         );
     }
 

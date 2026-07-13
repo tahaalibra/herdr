@@ -2204,7 +2204,7 @@ enum ClientLoopEvent {
     SupervisorApiRequestFinished {
         server_id: supervisor::ServerId,
         refresh: ClientApiRefreshPolicy,
-        result: Result<(), String>,
+        result: Result<Box<crate::api::schema::SuccessResponse>, String>,
         elapsed: Duration,
     },
     /// A secondary server client stream connection attempt completed off the UI loop.
@@ -3053,21 +3053,19 @@ fn send_client_supervisor_request(
 ) -> Result<(), String> {
     let target = api_target_for_supervisor_server(model, server_id, ssh_bridges)
         .ok_or_else(|| format!("no API target for server {server_id:?}"))?;
-    send_client_supervisor_request_to_target(target, request)
+    send_client_supervisor_request_to_target(target, request).map(|_| ())
 }
 
 #[cfg(unix)]
 fn send_client_supervisor_request_to_target(
     target: crate::api::client::ConnectionTarget,
     request: crate::api::schema::Request,
-) -> Result<(), String> {
+) -> Result<crate::api::schema::SuccessResponse, String> {
     let api = crate::api::client::ApiClient::for_target(target);
     let value = api
         .request_value_with_timeout(&request, CLIENT_SUPERVISOR_API_TIMEOUT)
         .map_err(|err| err.to_string())?;
-    crate::api::client::parse_response_value(value)
-        .map(|_| ())
-        .map_err(|err| err.to_string())
+    crate::api::client::parse_response_value(value).map_err(|err| err.to_string())
 }
 
 /// Route a sidebar-originated API request to the owning server off the UI loop, emitting
@@ -3086,7 +3084,7 @@ fn spawn_client_supervisor_request(
     let event_tx = event_tx.clone();
     std::thread::spawn(move || {
         let started_at = Instant::now();
-        let result = send_client_supervisor_request_to_target(target, request);
+        let result = send_client_supervisor_request_to_target(target, request).map(Box::new);
         let elapsed = started_at.elapsed();
         let _ = event_tx.blocking_send(ClientLoopEvent::SupervisorApiRequestFinished {
             server_id,
@@ -3344,7 +3342,7 @@ fn spawn_client_remote_manage_request(
     std::thread::spawn(move || {
         let started_at = Instant::now();
         let result = match target {
-            Some(target) => send_client_supervisor_request_to_target(target, request),
+            Some(target) => send_client_supervisor_request_to_target(target, request).map(|_| ()),
             None => Err("no API target for main server".to_string()),
         };
         let elapsed = started_at.elapsed();
@@ -5070,7 +5068,23 @@ async fn run_client_loop(
                     );
                 }
                 match result {
-                    Ok(()) => {
+                    Ok(response) => {
+                        // Optimistic echo: a created workspace is already fully
+                        // described in the response — merge it into the sidebar
+                        // NOW instead of waiting for the summary round-trip over
+                        // the (possibly ssh-bridged) API. The refresh below still
+                        // runs and reconciles authoritative state.
+                        if let crate::api::schema::ResponseResult::WorkspaceCreated {
+                            workspace,
+                            ..
+                        } = response.result
+                        {
+                            if let Some(model) = &mut state.supervisor_model {
+                                model.apply_created_workspace(&server_id, workspace);
+                                state.request_full_redraw();
+                                render_cached_composited_frame(&mut state);
+                            }
+                        }
                         if refresh == ClientApiRefreshPolicy::Immediate {
                             let now = Instant::now();
                             if let Some(model) = &mut state.supervisor_model {
