@@ -10,6 +10,8 @@
 - Added maki detection with idle, working, and blocked screen states. (#1301, thanks @tontinton)
 
 ### Fixed
+- The unified multi-server sidebar now reflects creating and closing remote spaces immediately: closes apply optimistically with the confirmation, change events that arrive during an in-flight summary refresh rerun as soon as it completes, and steady-state refreshes skip the redundant protocol ping over ssh bridges.
+- `herdr --remote <host>` standalone attach works again with the multi-remote bridges: the client bridge socket is now bound at the path the spawned client actually resolves (derived from the api socket override) instead of failing with ENOENT before any ssh connection.
 - Native Windows servers now detach from the terminal console that launched them, so closing WezTerm, Windows Terminal, or another host terminal no longer stops persistent pane processes. (#1329)
 - Windows API clients now remain connected while waiting for initial named-pipe request bytes, so `status server`, `api snapshot`, and other socket commands no longer intermittently fail with BrokenPipe. (#1279)
 - `herdr --remote` now installs remote helper binaries without routing the binary stream through a multiline `/bin/sh -c` command, fixing installs for non-POSIX login shells such as xonsh. (#1203, thanks @nhumrich)
