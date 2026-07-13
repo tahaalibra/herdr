@@ -316,9 +316,6 @@ pub enum HostBannerGradient {
     Muted,
 }
 
-// The cycle/name helpers feed the settings UI once the multi-server
-// client wiring lands; until then only tests exercise them.
-#[cfg_attr(not(test), allow(dead_code))]
 impl HostBannerGradient {
     pub fn next(self) -> Self {
         match self {
@@ -348,9 +345,6 @@ pub enum HostBannerAnimation {
     Static,
 }
 
-// The cycle/name helpers feed the settings UI once the multi-server
-// client wiring lands; until then only tests exercise them.
-#[cfg_attr(not(test), allow(dead_code))]
 impl HostBannerAnimation {
     pub fn next(self) -> Self {
         match self {
@@ -375,9 +369,6 @@ pub enum HostBannerSpeed {
     Lively,
 }
 
-// The cycle/name helpers feed the settings UI once the multi-server
-// client wiring lands; until then only tests exercise them.
-#[cfg_attr(not(test), allow(dead_code))]
 impl HostBannerSpeed {
     pub fn next(self) -> Self {
         match self {
@@ -412,9 +403,6 @@ pub enum HostBannerGlyph {
     None,
 }
 
-// The cycle/name helpers feed the settings UI once the multi-server
-// client wiring lands; until then only tests exercise them.
-#[cfg_attr(not(test), allow(dead_code))]
 impl HostBannerGlyph {
     pub fn next(self) -> Self {
         match self {

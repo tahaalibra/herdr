@@ -467,6 +467,74 @@ pub fn remove_section_key(content: &str, section: &str, key: &str) -> String {
     result.join("\n") + "\n"
 }
 
+/// Replace the inline body of `[<section>]` with `body`.
+///
+/// Nested subsections (`[<section>.<child>]`) are preserved verbatim. Duplicate
+/// target section headers are preserved too, with a warning, because removing
+/// malformed user config silently is riskier than surfacing it.
+pub fn upsert_section_body(content: &str, section: &str, body: &str) -> String {
+    let header = format!("[{section}]");
+    let nested_prefix = format!("[{section}.");
+    let lines: Vec<&str> = content.lines().collect();
+    let mut result = Vec::new();
+    let mut i = 0;
+    let mut replaced = false;
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+
+        if trimmed == header {
+            if replaced {
+                warn!(
+                    section = section,
+                    "upsert_section_body found duplicate [{section}] header; preserving it verbatim",
+                );
+                result.push(line.to_string());
+                i += 1;
+                continue;
+            }
+            replaced = true;
+            result.push(header.clone());
+            result.extend(body.trim_end().lines().map(str::to_string));
+            i += 1;
+            let mut copying_nested = false;
+            while i < lines.len() {
+                let current = lines[i];
+                let current_trimmed = current.trim();
+                let is_header = current_trimmed.starts_with('[') && current_trimmed.ends_with(']');
+                if is_header {
+                    if current_trimmed.starts_with(&nested_prefix) {
+                        copying_nested = true;
+                        result.push(current.to_string());
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+                if copying_nested {
+                    result.push(current.to_string());
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        result.push(line.to_string());
+        i += 1;
+    }
+
+    if !replaced {
+        if !result.is_empty() && !result.last().is_some_and(|line| line.trim().is_empty()) {
+            result.push(String::new());
+        }
+        result.push(header);
+        result.extend(body.trim_end().lines().map(str::to_string));
+    }
+
+    result.join("\n") + "\n"
+}
+
 pub fn remove_keybinding_config_sections(content: &str) -> (String, bool) {
     let mut result = Vec::new();
     let mut removed = false;
@@ -606,6 +674,39 @@ mod tests {
         assert!(!updated.contains("[ui.toast]\nenabled = true"));
         assert!(updated.contains("delivery = \"herdr\""));
         assert!(updated.contains("[ui.sound]\nenabled = true"));
+    }
+
+    #[test]
+    fn upsert_section_body_replaces_managed_body_and_preserves_following_sections() {
+        let content = r#"[ui.sidebar.host]
+# managed comments are replaced with the generated body
+gradient = "rainbow"
+[ui.sidebar.host.extras]
+accent = "cyan"
+[ui.sidebar.agents]
+rows = []
+"#;
+
+        let updated = upsert_section_body(
+            content,
+            "ui.sidebar.host",
+            "gradient = \"cool\"\nshow_count = true\n",
+        );
+
+        assert!(updated.contains(
+            "[ui.sidebar.host]\ngradient = \"cool\"\nshow_count = true\n[ui.sidebar.host.extras]\naccent = \"cyan\""
+        ));
+        assert!(updated.contains("[ui.sidebar.agents]\nrows = []"));
+        assert!(!updated.contains("managed comments"));
+    }
+
+    #[test]
+    fn upsert_section_body_appends_section_when_missing_in_empty_content() {
+        let updated = upsert_section_body("", "ui.sidebar.host", "show_count = false\n");
+        let parsed: toml::Value = toml::from_str(&updated).expect("output must parse as TOML");
+        assert!(updated.contains("[ui.sidebar.host]"));
+        assert!(updated.contains("show_count = false"));
+        assert!(parsed.get("ui").is_some());
     }
 
     #[test]

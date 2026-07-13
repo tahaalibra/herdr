@@ -26,9 +26,10 @@ use self::dialogs::{
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
 use self::keybind_help::render_keybind_help_overlay;
+pub(crate) use self::menus::render_global_launcher_menu;
 use self::menus::{
-    render_context_menu, render_copy_mode_overlay, render_global_launcher_menu,
-    render_navigate_overlay, render_prefix_overlay, render_resize_overlay,
+    render_context_menu, render_copy_mode_overlay, render_navigate_overlay, render_prefix_overlay,
+    render_resize_overlay,
 };
 use self::mobile::{
     compute_mobile_header_hit_areas, is_mobile_width, mobile_switcher_max_scroll_for_height,
@@ -50,7 +51,8 @@ pub(crate) use self::scrollbar::{
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
-use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+pub(crate) use self::sidebar::render_sidebar;
+use self::sidebar::render_sidebar_collapsed;
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
     toast_notification_rect,
@@ -76,8 +78,30 @@ pub(crate) use self::{
         normalized_workspace_scroll, sidebar_section_divider_rect, workspace_drop_indicator_row,
         workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        WorkspaceListEntry,
+        HostBannerArea, WorkspaceListEntry,
     },
+};
+// Staged re-exports for the client compositor phase: the compositor renders the client
+// overlays and hit-tests through these; nothing else consumes them via `crate::ui::` in
+// non-test builds yet. Remove the allow when the compositor lands.
+#[allow(unused_imports)]
+pub(crate) use self::{
+    dialogs::{
+        add_remote_button_rects, add_remote_inner_rect, add_remote_popup_rect,
+        confirm_close_workspace_button_rects, confirm_close_workspace_popup_rect,
+        new_workspace_picker_button_rects, new_workspace_picker_inner_rect,
+        new_workspace_picker_popup_rect, new_workspace_picker_row_rect,
+        remote_manage_confirm_button_rects, remote_manage_confirm_popup_rect,
+        remote_manage_inner_rect, remote_manage_popup_rect, remote_manage_row_rect,
+        rename_workspace_button_rects, rename_workspace_inner_rect, rename_workspace_popup_rect,
+        render_add_remote_overlay, render_confirm_close_workspace_overlay,
+        render_new_workspace_picker_overlay, render_remote_manage_overlay,
+        render_rename_workspace_overlay, render_workspace_context_menu_overlay,
+        workspace_context_menu_inner_rect, workspace_context_menu_popup_rect,
+        workspace_context_menu_row_rect, AddRemoteOverlayView, DestinationView,
+        RemoteManageRowView, RemoteStateGlyph, WorkspaceContextMenuView,
+    },
+    sidebar::{compute_workspace_list_areas_full, host_drop_indicator_row},
 };
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
@@ -226,6 +250,8 @@ pub(crate) fn compute_embedded_content_view_with_cell_size(
         layout: ViewLayout::Desktop,
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
+        divider_rows: Vec::new(),
+        host_banner_areas: Vec::new(),
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -393,6 +419,8 @@ fn compute_view_internal(
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
+        divider_rows: Vec::new(),
+        host_banner_areas: Vec::new(),
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -464,6 +492,8 @@ fn compute_mobile_view(
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
+        divider_rows: Vec::new(),
+        host_banner_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),
@@ -659,7 +689,7 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
         && b.y < a.y.saturating_add(a.height)
 }
 
-fn dim_background(frame: &mut Frame, area: Rect) {
+pub(crate) fn dim_background(frame: &mut Frame, area: Rect) {
     let buf = frame.buffer_mut();
     for y in area.y..area.y + area.height {
         for x in area.x..area.x + area.width {

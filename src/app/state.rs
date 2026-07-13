@@ -96,9 +96,6 @@ pub struct Palette {
 /// for the subtle hover surface. Only `Color::Rgb` pairs can blend; if either input is a
 /// non-`Rgb` color (e.g. the 16-color `terminal()` palette), fall back to `b` (the
 /// stronger/`surface_dim` side) so the result stays a safe, never-bold background.
-// Consumed by the client-rendered sidebar hover path once the compositor
-// wiring lands; until then only tests exercise the blend.
-#[cfg_attr(not(test), allow(dead_code))]
 fn blend_color(a: Color, b: Color, t: f32) -> Color {
     match (a, b) {
         (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
@@ -118,9 +115,6 @@ impl Palette {
     /// page background and the selection surface, so hover reads strictly weaker than
     /// selected(`surface0`)/active(`surface_dim`)/drag(`surface1`). Theme-derived (no per-theme
     /// table); non-`Rgb` palettes fall back to `surface_dim` (never bold). Hover NEVER bolds.
-    // Consumed by the client-rendered sidebar hover path once the compositor
-    // wiring lands.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn hover_bg(&self) -> Color {
         blend_color(self.panel_bg, self.surface_dim, 0.5)
     }
@@ -632,8 +626,8 @@ pub enum HostBannerState {
 /// Sidebar hover target. The agent variant is route-index keyed for the
 /// client path (route_idx survives recompose; pane_id does not) and pane_id keyed
 /// for the monolithic path (terminals are stable there).
-// Constructed by sidebar hover hit-testing once the compositor wiring lands;
-// the shared shape exists first so state, input, and render land in slices.
+// The route/destination variants are constructed by the client compositor
+// hover path (next phase); the monolithic hover path fills the rest.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarHoverTarget {
@@ -816,6 +810,10 @@ pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
+    /// Screen rows of the local→remote sidebar divider rules. Empty in monolithic mode.
+    pub divider_rows: Vec<u16>,
+    /// One rect per rendered host banner row. Empty in monolithic mode.
+    pub host_banner_areas: Vec<crate::ui::HostBannerArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -984,6 +982,8 @@ pub enum SettingsSection {
     Theme,
     Sound,
     Toast,
+    /// `[ui.sidebar.host]` presentation options for remote host banners.
+    SidebarHost,
     PaneLabels,
     Experiments,
     Integrations,
@@ -994,6 +994,7 @@ impl SettingsSection {
         Self::Theme,
         Self::Sound,
         Self::Toast,
+        Self::SidebarHost,
         Self::PaneLabels,
         Self::Integrations,
         Self::Experiments,
@@ -1004,6 +1005,7 @@ impl SettingsSection {
             Self::Theme => "theme",
             Self::Sound => "sound",
             Self::Toast => "toasts",
+            Self::SidebarHost => "sidebar",
             Self::PaneLabels => "pane labels",
             Self::Experiments => "experiments",
             Self::Integrations => "integrations",
@@ -1137,6 +1139,17 @@ pub struct SettingsState {
 pub(crate) enum DragTarget {
     WorkspaceReorder {
         source_ws_idx: usize,
+        insert_idx: Option<usize>,
+    },
+    /// An in-progress host (server) drag in the client-rendered sidebar.
+    /// `source_host_idx`/`insert_idx` index the ORDERED host/banner list (the visible-server
+    /// order). Client-local; the drop indicator is drawn only at host boundaries (banner rows
+    /// or the end of the list), never between two spaces.
+    // Constructed only by the client compositor drag path (next phase); render/tests
+    // already consume it, so the shape lands first.
+    #[cfg_attr(not(test), allow(dead_code))]
+    HostReorder {
+        source_host_idx: usize,
         insert_idx: Option<usize>,
     },
     TabReorder {
@@ -1585,6 +1598,8 @@ pub struct AppState {
     pub(crate) plugin_commands_in_flight: usize,
     /// Highlight state for the bottom-right global launcher menu.
     pub global_menu: MenuListState,
+    /// Client-owned shells can append local actions while reusing the server menu renderer.
+    pub(crate) global_menu_extra_labels: Vec<&'static str>,
     /// Resolved host terminal default colors for theming embedded panes.
     pub host_terminal_theme: TerminalTheme,
     /// Set when a persisted session snapshot would change.
@@ -1604,8 +1619,6 @@ impl AppState {
     }
 
     /// Update the sidebar hover target, returning whether it changed.
-    // Called from mouse-move handling once the compositor wiring lands.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_sidebar_hover(&mut self, next: Option<SidebarHoverTarget>) -> bool {
         let changed = self.sidebar_hover != next;
         self.sidebar_hover = next;
@@ -1843,6 +1856,8 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                divider_rows: Vec::new(),
+                host_banner_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -1953,6 +1968,7 @@ impl AppState {
             next_plugin_command_log_id: 1,
             plugin_commands_in_flight: 0,
             global_menu: MenuListState::new(0),
+            global_menu_extra_labels: Vec::new(),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
@@ -2444,6 +2460,13 @@ mod tests {
                 state
             );
         }
+    }
+
+    #[test]
+    fn view_state_carries_divider_and_banner_channels() {
+        let app = AppState::test_new();
+        assert!(app.view.divider_rows.is_empty());
+        assert!(app.view.host_banner_areas.is_empty());
     }
 
     #[test]

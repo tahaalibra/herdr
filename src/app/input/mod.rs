@@ -310,6 +310,14 @@ impl App {
                         SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
                             self.save_switch_ascii_input_source_in_prefix(enabled)
                         }
+                        SettingsAction::SaveSidebarHost {
+                            previous,
+                            preferences,
+                        } => {
+                            if !self.save_sidebar_host_preferences(preferences) {
+                                self.state.sidebar_host = previous;
+                            }
+                        }
                         SettingsAction::InstallRecommendedIntegrations => {
                             self.install_recommended_integrations()
                         }

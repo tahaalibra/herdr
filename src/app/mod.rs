@@ -565,6 +565,8 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                divider_rows: Vec::new(),
+                host_banner_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -666,6 +668,7 @@ impl App {
             next_plugin_command_log_id: 1,
             plugin_commands_in_flight: 0,
             global_menu: state::MenuListState::new(0),
+            global_menu_extra_labels: Vec::new(),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
@@ -2462,6 +2465,124 @@ mod tests {
             Some(crate::terminal_theme::HostAppearance::Dark)
         );
         assert_eq!(app.state.theme_name, "catppuccin");
+    }
+
+    #[test]
+    fn save_sidebar_host_preferences_writes_body() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("settings-save-sidebar-host");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let preferences = crate::config::SidebarHostConfig {
+            gradient: crate::config::HostBannerGradient::Cool,
+            animation: crate::config::HostBannerAnimation::Static,
+            speed: crate::config::HostBannerSpeed::Lively,
+            glyph: crate::config::HostBannerGlyph::None,
+            show_count: true,
+        };
+
+        assert!(app.save_sidebar_host_preferences(preferences.clone()));
+
+        // The flat [ui.sidebar.host] body is written and live-reloaded into state.
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[ui.sidebar.host]"));
+        assert!(content.contains(r#"gradient = "cool""#));
+        assert!(content.contains(r#"animation = "static""#));
+        assert!(content.contains(r#"speed = "lively""#));
+        assert!(content.contains(r#"glyph = "none""#));
+        assert!(content.contains("show_count = true"));
+        assert_eq!(app.state.sidebar_host, preferences);
+        assert!(app.state.config_diagnostic.is_none());
+
+        // Round-trips back to the same SidebarHostConfig.
+        let reparsed: crate::config::Config = toml::from_str(&content).unwrap();
+        assert_eq!(reparsed.ui.sidebar.host, preferences);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn host_setting_toggle_mutates_state_immediately() {
+        // Cycling an option mutates AppState.sidebar_host immediately (so the live demo
+        // reflects the change at once) and persists it through the save round-trip + live
+        // reload (immediate-save invariant). A config path is wired so the save succeeds.
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("settings-host-toggle");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.state.mode = Mode::Settings;
+        app.state.settings.section = state::SettingsSection::SidebarHost;
+        // Focus the glyph row (index 3) and cycle it with Space.
+        app.state.settings.list.selected = 3;
+        assert_eq!(
+            app.state.sidebar_host.glyph,
+            crate::config::HostBannerGlyph::Left
+        );
+
+        app.handle_settings_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        assert_eq!(
+            app.state.sidebar_host.glyph,
+            crate::config::HostBannerGlyph::None
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(r#"glyph = "none""#));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn api_server_ui_settings_returns_live_sidebar_preferences() {
+        let mut app = test_app();
+        app.state.sidebar_width = 31;
+        app.state.default_sidebar_width = 29;
+        app.state.sidebar_min_width = 20;
+        app.state.sidebar_max_width = 44;
+        app.state.sidebar_section_split = 0.4;
+
+        let mut spaces = app.state.sidebar_spaces.clone();
+        spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        app.state.sidebar_spaces = spaces.clone();
+
+        let mut agents = app.state.sidebar_agents.clone();
+        agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+        app.state.sidebar_agents = agents.clone();
+
+        let mut host = app.state.sidebar_host.clone();
+        host.gradient = crate::config::HostBannerGradient::Cool;
+        host.show_count = true;
+        app.state.sidebar_host = host.clone();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_ui_settings".into(),
+            method: crate::api::schema::Method::ServerUiSettings(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+        let response: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&response).unwrap();
+
+        match response.result {
+            crate::api::schema::ResponseResult::UiSettings { settings } => {
+                assert_eq!(settings.sidebar_width, 31);
+                assert_eq!(settings.sidebar_default_width, 29);
+                assert_eq!(settings.sidebar_min_width, 20);
+                assert_eq!(settings.sidebar_max_width, 44);
+                assert_eq!(settings.sidebar_section_split_per_mille, 400);
+                assert_eq!(settings.sidebar_spaces, spaces);
+                assert_eq!(settings.sidebar_agents, agents);
+                assert_eq!(settings.sidebar_host, host);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     #[test]

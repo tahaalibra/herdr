@@ -211,7 +211,7 @@ pub(super) fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: R
     }
 }
 
-pub(super) fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
+pub(crate) fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
     let rect = app.global_menu_rect();
     let Some(inner) = render_panel_shell(frame, rect, app.palette.accent, app.palette.panel_bg)
     else {

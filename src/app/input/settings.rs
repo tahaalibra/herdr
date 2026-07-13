@@ -19,6 +19,10 @@ pub(super) enum SettingsAction {
     SaveAgentBorderLabels(bool),
     SavePaneHistory(bool),
     SaveSwitchAsciiInputSourceInPrefix(bool),
+    SaveSidebarHost {
+        previous: crate::config::SidebarHostConfig,
+        preferences: crate::config::SidebarHostConfig,
+    },
     InstallRecommendedIntegrations,
 }
 
@@ -52,6 +56,14 @@ impl App {
                 }
                 SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
                     self.save_switch_ascii_input_source_in_prefix(enabled)
+                }
+                SettingsAction::SaveSidebarHost {
+                    previous,
+                    preferences,
+                } => {
+                    if !self.save_sidebar_host_preferences(preferences) {
+                        self.state.sidebar_host = previous;
+                    }
                 }
                 SettingsAction::InstallRecommendedIntegrations => {
                     self.install_recommended_integrations()
@@ -94,6 +106,31 @@ fn toast_delivery_for_index(idx: usize) -> ToastDelivery {
         2 => ToastDelivery::Terminal,
         _ => ToastDelivery::System,
     }
+}
+
+/// The sidebar-host section exposes a fixed option list (gradient/animation/speed/glyph/
+/// show_count). It does NOT use a rows/lines model.
+const SIDEBAR_HOST_OPTION_COUNT: usize = 5;
+
+/// Cycle the focused `[ui.sidebar.host]` option to its next value (or toggle `show_count`),
+/// mutate `AppState.sidebar_host` immediately (so the demo updates before the save round-trips),
+/// and emit a `SaveSidebarHost` so the change is persisted + live-reloaded.
+fn cycle_sidebar_host_option(state: &mut AppState) -> Option<SettingsAction> {
+    let previous = state.sidebar_host.clone();
+    let mut preferences = previous.clone();
+    match state.settings.list.selected {
+        0 => preferences.gradient = preferences.gradient.next(),
+        1 => preferences.animation = preferences.animation.next(),
+        2 => preferences.speed = preferences.speed.next(),
+        3 => preferences.glyph = preferences.glyph.next(),
+        4 => preferences.show_count = !preferences.show_count,
+        _ => return None,
+    }
+    state.sidebar_host = preferences.clone();
+    Some(SettingsAction::SaveSidebarHost {
+        previous,
+        preferences,
+    })
 }
 
 fn preview_selected_theme(state: &mut AppState) {
@@ -216,6 +253,33 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 state.settings.list.selected = usize::from(!state.sound_enabled());
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                state.settings.section = SettingsSection::SidebarHost;
+                state.settings.list.selected = 0;
+            }
+            _ => {
+                if let Some(super::modal::ModalAction::Close) =
+                    super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS)
+                {
+                    cancel_settings(state);
+                }
+            }
+        },
+        SettingsSection::SidebarHost => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => state.settings.list.move_prev(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.settings.list.move_next(SIDEBAR_HOST_OPTION_COUNT)
+            }
+            // Enter/Space cycle the focused host option (or toggle show_count). The state
+            // mutates immediately so the live demo reflects the change before the save
+            // round-trips (immediate-save invariant).
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                return cycle_sidebar_host_option(state);
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                state.settings.section = SettingsSection::Toast;
+                state.settings.list.selected = toast_delivery_index(state.toast_delivery());
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 state.settings.section = SettingsSection::PaneLabels;
                 state.settings.list.selected = usize::from(!state.agent_border_labels_enabled());
             }
@@ -236,8 +300,8 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 return Some(SettingsAction::SaveAgentBorderLabels(enabled));
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                state.settings.section = SettingsSection::Toast;
-                state.settings.list.selected = toast_delivery_index(state.toast_delivery());
+                state.settings.section = SettingsSection::SidebarHost;
+                state.settings.list.selected = 0;
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 state.settings.section = SettingsSection::Integrations;
@@ -311,6 +375,7 @@ pub(crate) fn open_settings_at(state: &mut AppState, section: SettingsSection) {
         SettingsSection::Theme => current_theme_index(&state.theme_name),
         SettingsSection::Sound => usize::from(!state.sound_enabled()),
         SettingsSection::Toast => toast_delivery_index(state.toast_delivery()),
+        SettingsSection::SidebarHost => 0,
         SettingsSection::PaneLabels => usize::from(!state.agent_border_labels_enabled()),
         SettingsSection::Experiments => 0,
         SettingsSection::Integrations => 0,
@@ -399,6 +464,14 @@ impl AppState {
                     None
                 }
             }
+            SettingsSection::SidebarHost => {
+                let list_y = area.y + 3;
+                if row >= list_y && row < list_y + SIDEBAR_HOST_OPTION_COUNT as u16 {
+                    Some((row - list_y) as usize)
+                } else {
+                    None
+                }
+            }
             SettingsSection::PaneLabels => {
                 let list_y = area.y + 3;
                 if row >= list_y && row < list_y + 2 {
@@ -428,6 +501,7 @@ impl AppState {
                         SettingsSection::Theme => current_theme_index(&self.theme_name),
                         SettingsSection::Sound => usize::from(!self.sound_enabled()),
                         SettingsSection::Toast => toast_delivery_index(self.toast_delivery()),
+                        SettingsSection::SidebarHost => 0,
                         SettingsSection::PaneLabels => {
                             usize::from(!self.agent_border_labels_enabled())
                         }
@@ -451,6 +525,8 @@ impl AppState {
                             let delivery = toast_delivery_for_index(idx);
                             Some(SettingsAction::SaveToastDelivery(delivery))
                         }
+                        // A click on a host option row cycles that option (mirrors Enter/Space).
+                        SettingsSection::SidebarHost => cycle_sidebar_host_option(self),
                         SettingsSection::PaneLabels => {
                             let enabled = idx == 0;
                             Some(SettingsAction::SaveAgentBorderLabels(enabled))
@@ -579,6 +655,164 @@ mod tests {
             Some(SettingsAction::SaveSwitchAsciiInputSourceInPrefix(true))
         );
         assert_eq!(state.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn settings_sidebar_host_space_cycles_focused_option_immediately() {
+        // Cycling an option mutates AppState.sidebar_host immediately (so the live demo
+        // reflects the change at once) and emits a SaveSidebarHost carrying previous+next.
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings_at(&mut state, SettingsSection::SidebarHost);
+        assert_eq!(state.settings.list.selected, 0);
+        assert_eq!(
+            state.sidebar_host.gradient,
+            crate::config::HostBannerGradient::Rainbow
+        );
+
+        let action = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()),
+        );
+
+        assert_eq!(
+            state.sidebar_host.gradient,
+            crate::config::HostBannerGradient::Accent
+        );
+        match action {
+            Some(SettingsAction::SaveSidebarHost {
+                previous,
+                preferences,
+            }) => {
+                assert_eq!(
+                    previous.gradient,
+                    crate::config::HostBannerGradient::Rainbow
+                );
+                assert_eq!(
+                    preferences.gradient,
+                    crate::config::HostBannerGradient::Accent
+                );
+            }
+            other => panic!("expected SaveSidebarHost, got {other:?}"),
+        }
+        assert_eq!(state.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn settings_sidebar_host_cycles_every_option_row() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings_at(&mut state, SettingsSection::SidebarHost);
+
+        // row 1: animation animated → static.
+        state.settings.list.selected = 1;
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            state.sidebar_host.animation,
+            crate::config::HostBannerAnimation::Static
+        );
+
+        // row 2: speed calm → normal.
+        state.settings.list.selected = 2;
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            state.sidebar_host.speed,
+            crate::config::HostBannerSpeed::Normal
+        );
+
+        // row 3: glyph left → none.
+        state.settings.list.selected = 3;
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            state.sidebar_host.glyph,
+            crate::config::HostBannerGlyph::None
+        );
+
+        // row 4: show_count false → true.
+        state.settings.list.selected = 4;
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert!(state.sidebar_host.show_count);
+    }
+
+    #[test]
+    fn settings_sidebar_host_down_navigates_option_rows() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings_at(&mut state, SettingsSection::SidebarHost);
+        for expected in 1..5usize {
+            update_settings_state(
+                &mut state,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            );
+            assert_eq!(state.settings.list.selected, expected);
+        }
+        // Bottom row clamps.
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_eq!(state.settings.list.selected, 4);
+    }
+
+    #[test]
+    fn settings_sidebar_host_sits_between_toast_and_pane_labels_in_tab_order() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings_at(&mut state, SettingsSection::Toast);
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+        );
+        assert_eq!(state.settings.section, SettingsSection::SidebarHost);
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+        );
+        assert_eq!(state.settings.section, SettingsSection::PaneLabels);
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()),
+        );
+        assert_eq!(state.settings.section, SettingsSection::SidebarHost);
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()),
+        );
+        assert_eq!(state.settings.section, SettingsSection::Toast);
+    }
+
+    #[test]
+    fn settings_mouse_click_cycles_sidebar_host_row() {
+        let mut app = app_for_mouse_test();
+        open_settings_at(&mut app.state, SettingsSection::SidebarHost);
+
+        let area = app.state.settings_content_rect();
+        // Row index 3 (glyph) sits at list_y + 3 = area.y + 6.
+        let action = app.state.handle_settings_mouse(mouse(
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            area.x + 2,
+            area.y + 6,
+        ));
+
+        assert_eq!(app.state.settings.list.selected, 3);
+        assert_eq!(
+            app.state.sidebar_host.glyph,
+            crate::config::HostBannerGlyph::None
+        );
+        match action {
+            Some(SettingsAction::SaveSidebarHost { preferences, .. }) => {
+                assert_eq!(preferences.glyph, crate::config::HostBannerGlyph::None);
+            }
+            other => panic!("expected SaveSidebarHost, got {other:?}"),
+        }
     }
 
     #[test]

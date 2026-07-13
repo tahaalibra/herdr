@@ -10,8 +10,8 @@ mod theme;
 pub use self::{
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
-        remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_bool,
-        upsert_section_value,
+        remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_body,
+        upsert_section_bool, upsert_section_value,
     },
     keybinds::{
         format_key_combo, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
@@ -25,8 +25,9 @@ pub use self::{
         ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
-        AgentSidebarToken, AgentsSidebarConfig, HostBannerAnimation, SidebarConfig,
-        SidebarHostConfig, SpaceSidebarToken, SpacesSidebarConfig,
+        AgentSidebarToken, AgentsSidebarConfig, HostBannerAnimation, HostBannerGlyph,
+        HostBannerGradient, SidebarConfig, SidebarHostConfig, SpaceSidebarToken,
+        SpacesSidebarConfig,
     },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},
@@ -34,6 +35,10 @@ pub use self::{
 
 pub(crate) use self::io::upsert_top_level_bool;
 pub(crate) use self::keybinds::parse_key_combo;
+// Named only by tests today (non-test code reaches the speed through the
+// `SidebarHostConfig` field); keep the export for the client compositor phase.
+#[cfg_attr(not(test), allow(unused_imports))]
+pub use self::sidebar::HostBannerSpeed;
 
 pub const CONFIG_PATH_ENV_VAR: &str = "HERDR_CONFIG_PATH";
 pub const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;

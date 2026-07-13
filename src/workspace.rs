@@ -8,9 +8,7 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
-use crate::layout::PaneId;
-#[cfg(test)]
-use crate::layout::TileLayout;
+use crate::layout::{PaneId, TileLayout};
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
@@ -186,6 +184,91 @@ impl DerefMut for Workspace {
 }
 
 impl Workspace {
+    /// Build a display-only `Workspace` for a remote sidebar entry: one tab whose panes attach
+    /// to the given terminal ids, with no PTYs, no git probing, and a fixed `custom_name`. The
+    /// client compositor uses these placeholders so the SHARED sidebar renderer can draw remote
+    /// workspaces without a local runtime. Returns the created pane ids in `pane_terminals`
+    /// order so the caller can map them back to remote panes.
+    // Constructed by the client compositor (next phase); shape + tests land first.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn sidebar_placeholder(
+        id: String,
+        name: String,
+        branch: Option<String>,
+        pane_terminals: Vec<(TerminalId, bool)>,
+        focused_pane_idx: Option<usize>,
+    ) -> (Self, Vec<PaneId>) {
+        let (events, _) = mpsc::channel(64);
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+        let identity_cwd = PathBuf::from("/");
+        let mut pane_terminals = pane_terminals;
+        if pane_terminals.is_empty() {
+            pane_terminals.push((TerminalId::alloc(), true));
+        }
+
+        let (mut layout, root_id) = TileLayout::new();
+        let mut panes = HashMap::new();
+        let mut pane_ids = vec![root_id];
+        let mut public_pane_numbers = HashMap::new();
+
+        let (root_terminal_id, root_seen) = pane_terminals[0].clone();
+        let mut root_pane = PaneState::new(root_terminal_id);
+        root_pane.seen = root_seen;
+        panes.insert(root_id, root_pane);
+        public_pane_numbers.insert(root_id, 1);
+
+        for (idx, (terminal_id, seen)) in pane_terminals.into_iter().enumerate().skip(1) {
+            let pane_id = layout.split_focused(Direction::Vertical);
+            let mut pane = PaneState::new(terminal_id);
+            pane.seen = seen;
+            panes.insert(pane_id, pane);
+            pane_ids.push(pane_id);
+            public_pane_numbers.insert(pane_id, idx + 1);
+        }
+
+        if let Some(focused_idx) = focused_pane_idx.and_then(|idx| pane_ids.get(idx).copied()) {
+            layout.focus_pane(focused_idx);
+        }
+
+        let tab = Tab {
+            custom_name: None,
+            number: 1,
+            root_pane: root_id,
+            layout,
+            panes,
+            #[cfg(test)]
+            runtimes: HashMap::new(),
+            zoomed: false,
+            events,
+            render_notify,
+            render_dirty,
+        };
+
+        let next_public_pane_number = pane_ids.len() + 1;
+        (
+            Self {
+                id,
+                custom_name: Some(name),
+                identity_cwd,
+                cached_git_branch: branch,
+                cached_git_ahead_behind: None,
+                cached_git_space: None,
+                worktree_space: None,
+                metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
+                metadata_token_sequences: HashMap::new(),
+                public_pane_numbers,
+                next_public_pane_number,
+                next_public_tab_number: 2,
+                tabs: vec![tab],
+                active_tab: 0,
+                #[cfg(test)]
+                test_runtimes: HashMap::new(),
+            },
+            pane_ids,
+        )
+    }
+
     fn adjust_active_tab_after_removal(&mut self, removed_idx: usize) {
         if self.tabs.is_empty() {
             self.active_tab = 0;
@@ -1614,6 +1697,60 @@ mod tests {
         assert_eq!(ws.tabs[2].number, 1);
         assert_eq!(ws.tabs[2].root_pane, moved_root);
         assert_eq!(ws.tabs[ws.active_tab].root_pane, active_root);
+        ws.assert_invariants_for_test();
+    }
+
+    // ---- sidebar_placeholder (display-only remote workspaces) ----
+
+    #[test]
+    fn sidebar_placeholder_builds_display_only_workspace() {
+        let terminals = vec![
+            (TerminalId::alloc(), true),
+            (TerminalId::alloc(), false),
+            (TerminalId::alloc(), true),
+        ];
+        let expected: Vec<TerminalId> = terminals.iter().map(|(id, _)| id.clone()).collect();
+
+        let (ws, pane_ids) = Workspace::sidebar_placeholder(
+            "remote:w1".into(),
+            "macmini".into(),
+            Some("main".into()),
+            terminals,
+            Some(1),
+        );
+
+        assert_eq!(ws.id, "remote:w1");
+        assert_eq!(ws.display_name(), "macmini");
+        assert_eq!(ws.branch().as_deref(), Some("main"));
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(pane_ids.len(), 3);
+        // Panes attach the given terminal ids in order and carry the seen flags.
+        for (idx, pane_id) in pane_ids.iter().enumerate() {
+            let pane = &ws.tabs[0].panes[pane_id];
+            assert_eq!(pane.attached_terminal_id, expected[idx]);
+            assert_eq!(pane.seen, idx != 1, "pane {idx} seen flag");
+        }
+        // Public pane numbers are 1-based and sequential; the counter continues after them.
+        for (idx, pane_id) in pane_ids.iter().enumerate() {
+            assert_eq!(ws.public_pane_numbers[pane_id], idx + 1);
+        }
+        assert_eq!(ws.next_public_pane_number, pane_ids.len() + 1);
+        // The requested pane is focused.
+        assert_eq!(ws.tabs[0].layout.focused(), pane_ids[1]);
+        // Display-only: no worktree/git provenance is probed.
+        assert!(ws.worktree_space.is_none());
+        assert!(ws.cached_git_space.is_none());
+        ws.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn sidebar_placeholder_defaults_to_one_pane_when_empty() {
+        let (ws, pane_ids) =
+            Workspace::sidebar_placeholder("remote:w2".into(), "empty".into(), None, vec![], None);
+        assert_eq!(pane_ids.len(), 1);
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(ws.tabs[0].panes.len(), 1);
+        assert!(ws.branch().is_none());
         ws.assert_invariants_for_test();
     }
 }

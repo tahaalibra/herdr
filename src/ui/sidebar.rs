@@ -2,7 +2,7 @@ mod tokens;
 
 use ratatui::{
     layout::{Alignment, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -278,9 +278,216 @@ pub(crate) fn grouped_child_display_label(
         .to_string()
 }
 
+// Lolcat-style per-character RGB gradient for the host banner name. Pure: the only animation
+// input is `tick` (fed from the client animation tick via `app.spinner_tick`; a frozen
+// `tick == 0` yields a fixed-but-correct spatial rainbow). A luma floor keeps every character
+// legible on the dark sidebar; speed `0.0` freezes the snapshot (Static mode).
+const HOST_BANNER_MIN_LUMA: f32 = 0.45;
+const HOST_BANNER_MAX_LUMA: f32 = 1.00;
+const HOST_BANNER_FREQ: f32 = 0.30;
+
+/// Deterministic RGB for `(tick, char_index)`. `speed == 0.0` => static snapshot (Static
+/// mode / frozen tick). Used both for the full rainbow sweep and (with a single base hue) the
+/// solid presets via [`host_banner_base_color`].
+fn host_banner_rgb(tick: u32, char_index: usize, freq: f32, speed: f32) -> (u8, u8, u8) {
+    let phase = freq * char_index as f32 + speed * tick as f32;
+    let chan = |offset: f32| -> u8 {
+        let raw = (phase + offset).sin() * 0.5 + 0.5; // 0.0..=1.0
+        let lit = HOST_BANNER_MIN_LUMA + raw * (HOST_BANNER_MAX_LUMA - HOST_BANNER_MIN_LUMA);
+        (lit * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    (
+        chan(0.0),
+        chan(std::f32::consts::TAU / 3.0),
+        chan(2.0 * std::f32::consts::TAU / 3.0),
+    )
+}
+
+/// The solid base color a non-rainbow gradient preset modulates. `Rainbow` returns `None`
+/// (full 3-phase sweep); the other presets map onto the matching palette colors and modulate
+/// only luma (hue fixed).
+fn host_banner_base_color(
+    gradient: crate::config::HostBannerGradient,
+    p: &Palette,
+) -> Option<Color> {
+    use crate::config::HostBannerGradient;
+    match gradient {
+        HostBannerGradient::Rainbow => None,
+        HostBannerGradient::Accent => Some(p.accent),
+        HostBannerGradient::Cool => Some(p.teal),
+        HostBannerGradient::Warm => Some(p.peach),
+        HostBannerGradient::Muted => Some(p.overlay1),
+    }
+}
+
+/// Scale an `(r, g, b)` base color by a luma factor (floored for legibility), returning a
+/// `Color::Rgb` for the solid (non-rainbow) presets.
+fn host_banner_scaled(base: (u8, u8, u8), char_index: usize, tick: u32, speed: f32) -> Color {
+    let phase = HOST_BANNER_FREQ * char_index as f32 + speed * tick as f32;
+    let raw = phase.sin() * 0.5 + 0.5; // 0.0..=1.0
+    let factor = HOST_BANNER_MIN_LUMA + raw * (HOST_BANNER_MAX_LUMA - HOST_BANNER_MIN_LUMA);
+    let scale = |c: u8| (c as f32 * factor).round().clamp(0.0, 255.0) as u8;
+    Color::Rgb(scale(base.0), scale(base.1), scale(base.2))
+}
+
+/// Per-character bold gradient spans for a host banner name. One `Span` per char, `fg =
+/// Color::Rgb`, `Modifier::BOLD`. `Static` animation freezes the gradient (speed 0).
+fn host_banner_spans(
+    name: &str,
+    tick: u32,
+    cfg: &crate::config::SidebarHostConfig,
+    p: &Palette,
+) -> Vec<Span<'static>> {
+    use crate::config::HostBannerAnimation;
+    let speed = match cfg.animation {
+        HostBannerAnimation::Static => 0.0,
+        HostBannerAnimation::Animated => cfg.speed.drift(),
+    };
+    let base = host_banner_base_color(cfg.gradient, p).map(|color| match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        // Non-Rgb palette colors (possible with the 16-color terminal palette) fall back to text.
+        _ => match p.text {
+            Color::Rgb(r, g, b) => (r, g, b),
+            _ => (205, 214, 244),
+        },
+    });
+    name.chars()
+        .enumerate()
+        .map(|(idx, ch)| {
+            let color = match base {
+                Some(base) => host_banner_scaled(base, idx, tick, speed),
+                None => {
+                    let (r, g, b) = host_banner_rgb(tick, idx, HOST_BANNER_FREQ, speed);
+                    Color::Rgb(r, g, b)
+                }
+            };
+            Span::styled(
+                ch.to_string(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect()
+}
+
+/// The leading connection-state glyph for a host banner (when `cfg.glyph == Left`).
+/// `Connected` uses the gradient first-char color; the caller picks the color.
+fn host_banner_glyph(state: crate::app::state::HostBannerState) -> &'static str {
+    use crate::app::state::HostBannerState;
+    match state {
+        HostBannerState::Connected => "◆",
+        HostBannerState::Connecting
+        | HostBannerState::Disconnected
+        | HostBannerState::ProtocolMismatch
+        | HostBannerState::Disabled => "◇",
+    }
+}
+
+/// The dim suffix that follows the host name, keyed off the banner state. `Connected` only
+/// shows `· N spaces` when `show_count` is set; the other states surface the state word.
+fn host_banner_suffix(
+    state: crate::app::state::HostBannerState,
+    space_count: usize,
+    show_count: bool,
+) -> Option<String> {
+    use crate::app::state::HostBannerState;
+    match state {
+        HostBannerState::Connected => show_count.then(|| format!(" · {space_count} spaces")),
+        HostBannerState::Connecting => Some(" · connecting".to_string()),
+        HostBannerState::Disconnected => Some(" · offline".to_string()),
+        HostBannerState::ProtocolMismatch => Some(" · protocol mismatch".to_string()),
+        HostBannerState::Disabled => Some(" · disabled".to_string()),
+    }
+}
+
+/// Human-readable downstream rate for the host banner, e.g. `312kb/s`, `1.2mb/s`.
+fn format_download_rate(bps: u64) -> String {
+    if bps >= 1_000_000 {
+        format!("{:.1}mb/s", bps as f64 / 1_000_000.0)
+    } else if bps >= 1_000 {
+        format!("{}kb/s", bps / 1_000)
+    } else {
+        format!("{bps}b/s")
+    }
+}
+
+/// Color-grade a host by health: green when smooth, yellow when warming, peach when laggy, red
+/// when down/incompatible, dim until the first latency sample.
+fn host_health_color(
+    latency_ms: Option<u32>,
+    state: crate::app::state::HostBannerState,
+    p: &Palette,
+) -> Color {
+    use crate::app::state::HostBannerState;
+    match state {
+        HostBannerState::Disconnected | HostBannerState::ProtocolMismatch => return p.red,
+        HostBannerState::Disabled => return p.overlay0,
+        _ => {}
+    }
+    match latency_ms {
+        None => p.overlay0,
+        Some(ms) if ms <= 80 => p.green,
+        Some(ms) if ms <= 200 => p.yellow,
+        Some(_) => p.peach,
+    }
+}
+
+/// Build the right-aligned banner metric spans (`↓312kb/s 50ms`) and their display width. Empty
+/// when nothing has been measured yet. The download rate is dim; the ping is health-graded so a
+/// glance reads green=smooth … red=laggy.
+fn host_banner_metric_spans(
+    spec: &crate::app::state::HostBannerSpec,
+    p: &Palette,
+) -> (Vec<Span<'static>>, usize) {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut text = String::new();
+    let health = host_health_color(spec.latency_ms, spec.connection_state, p);
+
+    if let Some(bps) = spec.download_bps.filter(|bps| *bps > 0) {
+        let rate = format_download_rate(bps);
+        spans.push(Span::styled("↓", Style::default().fg(p.teal)));
+        spans.push(Span::styled(rate.clone(), Style::default().fg(p.overlay1)));
+        text.push('↓');
+        text.push_str(&rate);
+    }
+
+    if let Some(ms) = spec.latency_ms {
+        if !text.is_empty() {
+            spans.push(Span::raw(" "));
+            text.push(' ');
+        }
+        let ping = format!("{ms}ms");
+        spans.push(Span::styled(
+            ping.clone(),
+            Style::default().fg(health).add_modifier(Modifier::BOLD),
+        ));
+        text.push_str(&ping);
+    }
+
+    let width = display_width(&text);
+    (spans, width)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceListEntry {
-    Workspace { ws_idx: usize, indented: bool },
+    Workspace {
+        ws_idx: usize,
+        indented: bool,
+    },
+    /// The local→remote divider rule. Empty (never emitted) in monolithic mode.
+    Divider {
+        labeled: bool,
+    },
+    /// A remote host's banner row; `banner_idx` indexes `app.host_banners`.
+    HostBanner {
+        banner_idx: usize,
+    },
+}
+
+/// One per rendered `HostBanner` entry in the workspace list. Empty in monolithic mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HostBannerArea {
+    pub banner_idx: usize,
+    pub rect: Rect,
 }
 
 pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
@@ -305,7 +512,80 @@ pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested:
 }
 
 pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
-    workspace_list_entries_inner(app, false)
+    let entries = workspace_list_entries_inner(app, false);
+    let entries = insert_local_remote_divider(app, entries);
+    insert_host_banners(app, entries)
+}
+
+/// Insert one `HostBanner { banner_idx }` immediately before each remote host group's first
+/// workspace, in visible-server order (the order `app.host_banners` and `app.host_banner_rows`
+/// are built in). `host_banner_rows[i]` is the `ws_idx` of the i-th banner's host group's first
+/// workspace; the banner sits BELOW the local→remote divider (which was already inserted) and
+/// ABOVE that host's `Workspace` rows. Empty in monolithic mode (no banners). `banner_idx`
+/// indexes `app.host_banners`.
+fn insert_host_banners(
+    app: &AppState,
+    entries: Vec<WorkspaceListEntry>,
+) -> Vec<WorkspaceListEntry> {
+    if app.host_banner_rows.is_empty() {
+        return entries;
+    }
+
+    let mut result = Vec::with_capacity(entries.len() + app.host_banner_rows.len());
+    for entry in entries {
+        if let WorkspaceListEntry::Workspace {
+            ws_idx,
+            indented: false,
+        } = entry
+        {
+            // A banner precedes the un-indented first row of its host group. Each host's first
+            // workspace is recorded once in `host_banner_rows`; emit its banner here.
+            if let Some(banner_idx) = app.host_banner_rows.iter().position(|row| *row == ws_idx) {
+                result.push(WorkspaceListEntry::HostBanner { banner_idx });
+            }
+        }
+        result.push(entry);
+    }
+    result
+}
+
+/// Insert exactly ONE `Divider` at the first local→remote boundary in the EMITTED (visual)
+/// entry order. The per-row local/remote signal is `app.client_workspace_remote` (index-aligned
+/// with `app.workspaces`, empty in monolithic mode so no divider). Inserted only when BOTH a
+/// local (`false`) and a remote (`true`) workspace are present in the emitted order — never a
+/// dangling rule for all-local / all-remote / single-server-filter (one role group → no
+/// transition). The divider sits ABOVE offline/empty-remote placeholder rows (those carry
+/// `is_remote == true`). `labeled = !app.host_banner_active`: a standalone `─ remote ─` rule
+/// until the host banner owns the host name, then a plain rule.
+fn insert_local_remote_divider(
+    app: &AppState,
+    entries: Vec<WorkspaceListEntry>,
+) -> Vec<WorkspaceListEntry> {
+    let is_remote = |entry: &WorkspaceListEntry| match entry {
+        WorkspaceListEntry::Workspace { ws_idx, .. } => {
+            app.client_workspace_remote.get(*ws_idx).copied()
+        }
+        // Non-selectable rows carry no role; the host banner rides positionally below.
+        WorkspaceListEntry::Divider { .. } | WorkspaceListEntry::HostBanner { .. } => None,
+    };
+
+    let any_local = entries.iter().any(|entry| is_remote(entry) == Some(false));
+    let boundary = entries
+        .iter()
+        .position(|entry| is_remote(entry) == Some(true));
+
+    // Both groups must be present in the emitted order, or there is no boundary to mark.
+    let Some(boundary) = boundary.filter(|_| any_local) else {
+        return entries;
+    };
+
+    let mut with_divider = Vec::with_capacity(entries.len() + 1);
+    with_divider.extend(entries[..boundary].iter().cloned());
+    with_divider.push(WorkspaceListEntry::Divider {
+        labeled: !app.host_banner_active,
+    });
+    with_divider.extend(entries[boundary..].iter().cloned());
+    with_divider
 }
 
 /// Like [`workspace_list_entries`] but always expands worktree groups, ignoring
@@ -452,6 +732,8 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
                     workspace_entry_gap(&entries, entry_idx, *indented),
                 )
             }
+            // Each non-selectable layout row consumes exactly one row, tight (no gap).
+            WorkspaceListEntry::Divider { .. } | WorkspaceListEntry::HostBanner { .. } => (1, 0),
         };
         if used_rows.saturating_add(row_height) > body.height {
             break;
@@ -471,13 +753,18 @@ fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
     let mut used_rows = 0u16;
     let mut start = entries.len();
     for (entry_idx, entry) in entries.iter().enumerate().rev() {
-        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry;
-        let Some(workspace) = app.workspaces.get(*ws_idx) else {
-            continue;
+        let needed = match entry {
+            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+                let Some(workspace) = app.workspaces.get(*ws_idx) else {
+                    continue;
+                };
+                let gap = workspace_entry_gap(&entries, entry_idx, *indented);
+                workspace_row_height_in_body(app, workspace, *indented, body.height)
+                    .saturating_add(gap)
+            }
+            // Each non-selectable layout row consumes exactly one row, tight (no gap).
+            WorkspaceListEntry::Divider { .. } | WorkspaceListEntry::HostBanner { .. } => 1,
         };
-        let gap = workspace_entry_gap(&entries, entry_idx, *indented);
-        let needed = workspace_row_height_in_body(app, workspace, *indented, body.height)
-            .saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
@@ -631,23 +918,45 @@ pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<R
 pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
-) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
+) -> (
+    Vec<crate::app::state::WorkspaceCardArea>,
+    Vec<HostBannerArea>,
+) {
+    let (cards, banner_areas, _divider_rows) = compute_workspace_list_areas_full(app, area);
+    (cards, banner_areas)
+}
+
+/// Single-pass producer of every workspace-list row geometry: workspace card rects, host
+/// banner rects, and divider rows. Render AND hit-test both consume the outputs of this ONE
+/// pass, so the divider's `y` can never drift from the card geometry (render == hit_test
+/// invariant). The two-tuple `compute_workspace_list_areas` and the `.0`-only
+/// `compute_workspace_card_areas` delegate to this; the client compositor assigns all three
+/// view channels from one call.
+pub(crate) fn compute_workspace_list_areas_full(
+    app: &AppState,
+    area: Rect,
+) -> (
+    Vec<crate::app::state::WorkspaceCardArea>,
+    Vec<HostBannerArea>,
+    Vec<u16>,
+) {
     let ws_area = workspace_list_rect(area, app.sidebar_section_split);
     if ws_area == Rect::default() {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     }
 
     let metrics = workspace_list_scroll_metrics(app, ws_area);
     let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
     if body.width == 0 || body.height == 0 {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     }
 
     let scroll = app.workspace_scroll;
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
     let mut cards = Vec::new();
-    let headers = Vec::new();
+    let mut banner_areas: Vec<HostBannerArea> = Vec::new();
+    let mut divider_rows: Vec<u16> = Vec::new();
 
     let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
@@ -671,10 +980,31 @@ pub(crate) fn compute_workspace_list_areas(
                     row_y = row_y.saturating_add(1);
                 }
             }
+            // Advance one row, record the divider y, no card, no banner area (tight).
+            WorkspaceListEntry::Divider { .. } => {
+                let row_height = 1;
+                if row_y.saturating_add(row_height) > body_bottom {
+                    break;
+                }
+                divider_rows.push(row_y);
+                row_y = row_y.saturating_add(row_height);
+            }
+            // Advance one row AND push a banner area (tight, no gap).
+            WorkspaceListEntry::HostBanner { banner_idx } => {
+                let row_height = 1;
+                if row_y.saturating_add(row_height) > body_bottom {
+                    break;
+                }
+                banner_areas.push(HostBannerArea {
+                    banner_idx: *banner_idx,
+                    rect: Rect::new(body.x, row_y, body.width, row_height),
+                });
+                row_y = row_y.saturating_add(row_height);
+            }
         }
     }
 
-    (cards, headers)
+    (cards, banner_areas, divider_rows)
 }
 
 pub(crate) fn compute_workspace_card_areas(
@@ -843,7 +1173,39 @@ pub(crate) fn workspace_drop_indicator_row(
     None
 }
 
-pub(super) fn render_sidebar(
+/// Resolve a host insert position (`0..=banners.len()`) to the screen row the host drop
+/// indicator draws on, mirroring `workspace_drop_indicator_row` but operating on host banner
+/// rects. `banners[i]` is the i-th host's banner; an `insert_idx` of `i` draws just above
+/// banner `i`, and `banners.len()` draws just below the last banner (end of the host list). The
+/// returned row is therefore ALWAYS a host boundary — never inside a space block.
+pub(crate) fn host_drop_indicator_row(
+    banners: &[HostBannerArea],
+    area: Rect,
+    insert_idx: usize,
+) -> Option<u16> {
+    if area.height == 0 {
+        return None;
+    }
+    let list_bottom = area.y + area.height.saturating_sub(1);
+
+    if let Some(banner) = banners.get(insert_idx) {
+        return banner.rect.y.checked_sub(1).filter(|y| *y < list_bottom);
+    }
+    // insert_idx == banners.len(): just below the last banner (end of the host list).
+    if insert_idx == banners.len() {
+        if let Some(last) = banners.last() {
+            return last
+                .rect
+                .y
+                .saturating_add(last.rect.height)
+                .checked_sub(1)
+                .filter(|y| *y < list_bottom);
+        }
+    }
+    None
+}
+
+pub(crate) fn render_sidebar(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
@@ -1063,6 +1425,20 @@ fn render_workspace_list(
             insert_idx: Some(insert_idx),
             ..
         }) => workspace_drop_indicator_row(&app.view.workspace_card_areas, area, *insert_idx),
+        // A host drag draws the SAME accent drop line, but at a host boundary computed from
+        // the banner rects only (never inside a space block).
+        Some(crate::app::state::DragTarget::HostReorder {
+            insert_idx: Some(insert_idx),
+            ..
+        }) => host_drop_indicator_row(&app.view.host_banner_areas, area, *insert_idx),
+        _ => None,
+    };
+    // The dragged host's banner index (== its position in the ordered host list), so its
+    // banner row dims while dragging — mirroring the dragged-workspace lift.
+    let dragged_host_idx = match app.drag.as_ref().map(|drag| &drag.target) {
+        Some(crate::app::state::DragTarget::HostReorder {
+            source_host_idx, ..
+        }) => Some(*source_host_idx),
         _ => None,
     };
 
@@ -1089,7 +1465,12 @@ fn render_workspace_list(
         let selected = i == app.selected && is_navigating;
         let is_active = Some(i) == app.active;
         let is_dragged = dragged_ws_idx == Some(i);
-        let highlighted = selected || is_active || is_dragged;
+        // A row is hovered when the mirrored hover target names this ws_idx. Hover is the
+        // LOWEST-priority highlight (selection/drag/active always win) and never bolds (the
+        // `name_style` gate below is untouched).
+        let hovered = app.sidebar_hover
+            == Some(crate::app::state::SidebarHoverTarget::Workspace { ws_idx: i });
+        let highlighted = selected || is_active || is_dragged || hovered;
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
 
         if highlighted {
@@ -1097,8 +1478,11 @@ fn render_workspace_list(
                 p.surface0
             } else if is_dragged {
                 p.surface1
-            } else {
+            } else if is_active {
                 p.surface_dim
+            } else {
+                // hovered-only (the prior three arms are false) → subtle theme-derived lift.
+                p.hover_bg()
             };
             let buf = frame.buffer_mut();
             for y in row_y..row_y + row_height {
@@ -1203,6 +1587,116 @@ fn render_workspace_list(
         }
     }
 
+    // Draw each host banner at its rect from `app.view.host_banner_areas` (the SAME single
+    // `compute_workspace_list_areas_full` pass that produced the card geometry, so render never
+    // recomputes a banner y — render == hit_test). Content left→right: optional connection
+    // glyph, the per-char lolcat gradient host name (bold), an optional dim suffix.
+    for (host_idx, banner_area) in app.view.host_banner_areas.iter().enumerate() {
+        let row_y = banner_area.rect.y;
+        if row_y >= list_bottom {
+            continue;
+        }
+        let Some(spec) = app.host_banners.get(banner_area.banner_idx) else {
+            continue;
+        };
+        // Dim the dragged host's banner row while a host drag is live (mirrors the
+        // dragged-workspace `surface1` lift). Banner index == host position in the ordered list.
+        if dragged_host_idx == Some(host_idx) {
+            let buf = frame.buffer_mut();
+            for x in banner_area.rect.x..banner_area.rect.x + banner_area.rect.width {
+                buf[(x, row_y)].set_style(Style::default().bg(p.surface1));
+            }
+        }
+        let name_spans =
+            host_banner_spans(&spec.display_name, app.spinner_tick, &app.sidebar_host, p);
+        let glyph_color = match spec.connection_state {
+            crate::app::state::HostBannerState::Connected => name_spans
+                .first()
+                .and_then(|span| span.style.fg)
+                .unwrap_or(p.overlay0),
+            crate::app::state::HostBannerState::ProtocolMismatch
+            | crate::app::state::HostBannerState::Disconnected => p.red,
+            _ => p.overlay0,
+        };
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if app.sidebar_host.glyph == crate::config::HostBannerGlyph::Left {
+            spans.push(Span::styled(
+                host_banner_glyph(spec.connection_state),
+                Style::default().fg(glyph_color),
+            ));
+            spans.push(Span::raw(" "));
+        }
+        spans.extend(name_spans);
+        if let Some(suffix) = host_banner_suffix(
+            spec.connection_state,
+            spec.space_count,
+            app.sidebar_host.show_count,
+        ) {
+            spans.push(Span::styled(suffix, Style::default().fg(p.overlay0)));
+        }
+        // Left side (glyph + rainbow name + suffix): its display width gates whether the metric fits.
+        let name_width: usize = spans
+            .iter()
+            .map(|span| display_width(span.content.as_ref()))
+            .sum();
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(banner_area.rect.x, row_y, banner_area.rect.width, 1),
+        );
+
+        // Right-aligned `↓rate ping` health readout. Drawn in its own sub-rect at the right
+        // edge so it never erases the name; skipped when the row is too narrow to fit it with
+        // at least one column of breathing room.
+        let (metric_spans, metric_width) = host_banner_metric_spans(spec, p);
+        let banner_width = banner_area.rect.width as usize;
+        if metric_width > 0 && banner_width > name_width + metric_width {
+            let metric_x = banner_area.rect.x + banner_area.rect.width - metric_width as u16;
+            frame.render_widget(
+                Paragraph::new(Line::from(metric_spans)),
+                Rect::new(metric_x, row_y, metric_width as u16, 1),
+            );
+        }
+    }
+
+    // Draw the local→remote divider rule at each `y` from `app.view.divider_rows`. The `y`s
+    // come from the SAME `compute_workspace_list_areas_full` pass that produced the card
+    // geometry, so render never recomputes a y and can never drift from hit-test. Labeled mode
+    // (no host banner yet) draws a centered `─ remote ─` rule; plain mode (the banner owns host
+    // naming) draws an unbroken `─` rule. Both dim (`surface_dim`), matching the
+    // collapsed-sidebar separator precedent.
+    let divider_labeled = !app.host_banner_active;
+    for &row_y in &app.view.divider_rows {
+        if row_y >= list_bottom {
+            continue;
+        }
+        let rule_right = scrollbar_rect
+            .map(|rect| rect.x)
+            .unwrap_or(area.x + area.width);
+        if rule_right <= area.x {
+            continue;
+        }
+        let rule_width = rule_right - area.x;
+        let style = Style::default().fg(p.surface_dim);
+        {
+            let buf = frame.buffer_mut();
+            for x in area.x..rule_right {
+                buf[(x, row_y)].set_symbol("─");
+                buf[(x, row_y)].set_style(style);
+            }
+        }
+        if divider_labeled {
+            const LABEL: &str = " remote ";
+            let label_len = LABEL.chars().count() as u16;
+            if rule_width > label_len {
+                let label_x = area.x + (rule_width - label_len) / 2;
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(LABEL, style))),
+                    Rect::new(label_x, row_y, label_len, 1),
+                );
+            }
+        }
+    }
+
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
         let indicator_right = scrollbar_rect
             .map(|rect| rect.x)
@@ -1219,9 +1713,22 @@ fn render_workspace_list(
     }
 
     if app.mouse_capture && list_bottom > area.y {
+        // Hovering an affordance lifts its fg overlay0 → subtext0 (the badge `●` color is
+        // unchanged); the `app.mouse_capture` gate above also gates whether hover can ever
+        // resolve `New`/`Menu` (the hover hit-test mirrors this draw gate).
+        let new_fg = if app.sidebar_hover == Some(crate::app::state::SidebarHoverTarget::New) {
+            p.subtext0
+        } else {
+            p.overlay0
+        };
+        let menu_fg = if app.sidebar_hover == Some(crate::app::state::SidebarHoverTarget::Menu) {
+            p.subtext0
+        } else {
+            p.overlay0
+        };
         let new_rect = app.sidebar_new_button_rect();
         frame.render_widget(
-            Paragraph::new(Span::styled(" new", Style::default().fg(p.overlay0))),
+            Paragraph::new(Span::styled(" new", Style::default().fg(new_fg))),
             new_rect,
         );
 
@@ -1232,10 +1739,10 @@ fn render_workspace_list(
                     "● ",
                     Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("menu", Style::default().fg(p.overlay0)),
+                Span::styled("menu", Style::default().fg(menu_fg)),
             ])
         } else {
-            Line::from(vec![Span::styled("menu", Style::default().fg(p.overlay0))])
+            Line::from(vec![Span::styled("menu", Style::default().fg(menu_fg))])
         };
         frame.render_widget(
             Paragraph::new(menu_line).alignment(Alignment::Right),
@@ -1271,10 +1778,18 @@ fn render_agent_detail(
     );
     let toggle_rect = agent_panel_toggle_rect(area, app.agent_panel_sort);
     if toggle_rect != Rect::default() {
+        // Sort-toggle hover lifts fg overlay0 → subtext0 (monolithic-only — the client
+        // hover path has no ScopeToggle target).
+        let toggle_fg =
+            if app.sidebar_hover == Some(crate::app::state::SidebarHoverTarget::ScopeToggle) {
+                p.subtext0
+            } else {
+                p.overlay0
+            };
         frame.render_widget(
             Paragraph::new(Span::styled(
                 agent_panel_sort_label(app.agent_panel_sort),
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                Style::default().fg(toggle_fg).add_modifier(Modifier::BOLD),
             ))
             .alignment(Alignment::Right),
             toggle_rect,
@@ -1291,7 +1806,11 @@ fn render_agent_detail(
 
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
-    for detail in details.iter().skip(app.agent_panel_scroll) {
+    // `skip(agent_panel_scroll)` drops the leading entries, so recover the GLOBAL entry index
+    // (`agent_panel_scroll + offset`) to compare against the client `AgentRoute { route_idx }`
+    // (route_idx is the flat global index, stable across recompose).
+    for (offset, detail) in details.iter().skip(app.agent_panel_scroll).enumerate() {
+        let global_idx = app.agent_panel_scroll.saturating_add(offset);
         let label_color = state_label_color(detail.state, detail.seen, p);
         let rows = resolved_agent_rows(app, detail);
         let height = (rows.len().max(1) as u16).min(body.height);
@@ -1300,8 +1819,23 @@ fn render_agent_detail(
         }
 
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+        // hover matches the monolithic pane-keyed variant OR the client route-index variant.
+        // Active always wins; hover never bolds.
+        let hovered = match app.sidebar_hover {
+            Some(crate::app::state::SidebarHoverTarget::AgentMono {
+                ws_idx,
+                tab_idx,
+                pane_id,
+            }) => ws_idx == detail.ws_idx && tab_idx == detail.tab_idx && pane_id == detail.pane_id,
+            Some(crate::app::state::SidebarHoverTarget::AgentRoute { route_idx }) => {
+                route_idx == global_idx
+            }
+            _ => false,
+        };
         let row_style = if is_active {
             Style::default().bg(p.surface_dim)
+        } else if hovered {
+            Style::default().bg(p.hover_bg())
         } else {
             Style::default()
         };
@@ -1345,6 +1879,32 @@ fn render_agent_detail(
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
+}
+
+/// A labeled live demo banner for the host-settings panel — the same glyph + per-char lolcat
+/// gradient name + optional suffix the real banner renders, so changing a setting
+/// (immediate-save) updates the demo. Uses a fixed `"demo"` host name.
+pub(crate) fn settings_sidebar_host_demo_line(app: &AppState) -> Line<'static> {
+    let p = &app.palette;
+    let spec_state = crate::app::state::HostBannerState::Connected;
+    let name_spans = host_banner_spans("demo", app.spinner_tick, &app.sidebar_host, p);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if app.sidebar_host.glyph == crate::config::HostBannerGlyph::Left {
+        let glyph_color = name_spans
+            .first()
+            .and_then(|span| span.style.fg)
+            .unwrap_or(p.overlay0);
+        spans.push(Span::styled(
+            host_banner_glyph(spec_state),
+            Style::default().fg(glyph_color),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    spans.extend(name_spans);
+    if let Some(suffix) = host_banner_suffix(spec_state, 3, app.sidebar_host.show_count) {
+        spans.push(Span::styled(suffix, Style::default().fg(p.overlay0)));
+    }
+    Line::from(spans)
 }
 
 pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
@@ -2285,5 +2845,893 @@ mod tests {
                 },
             ]
         );
+    }
+
+    // ---- host banner readouts ----
+
+    #[test]
+    fn format_download_rate_scales_units() {
+        assert_eq!(format_download_rate(512), "512b/s");
+        assert_eq!(format_download_rate(312_000), "312kb/s");
+        assert_eq!(format_download_rate(1_500_000), "1.5mb/s");
+    }
+
+    #[test]
+    fn host_health_color_grades_by_latency() {
+        let p = Palette::catppuccin();
+        use crate::app::state::HostBannerState::Connected;
+        assert_eq!(host_health_color(None, Connected, &p), p.overlay0);
+        assert_eq!(host_health_color(Some(40), Connected, &p), p.green);
+        assert_eq!(host_health_color(Some(120), Connected, &p), p.yellow);
+        assert_eq!(host_health_color(Some(400), Connected, &p), p.peach);
+        // A down host is always red regardless of any stale latency sample.
+        assert_eq!(
+            host_health_color(
+                Some(5),
+                crate::app::state::HostBannerState::Disconnected,
+                &p
+            ),
+            p.red
+        );
+    }
+
+    #[test]
+    fn host_banner_metric_spans_combine_rate_and_ping() {
+        let p = Palette::catppuccin();
+        let spec = crate::app::state::HostBannerSpec {
+            display_name: "macmini".into(),
+            connection_state: crate::app::state::HostBannerState::Connected,
+            space_count: 1,
+            latency_ms: Some(50),
+            download_bps: Some(312_000),
+        };
+        let (spans, width) = host_banner_metric_spans(&spec, &p);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "↓312kb/s 50ms");
+        assert!(width > 0);
+        // Nothing measured → no metric.
+        let empty = crate::app::state::HostBannerSpec {
+            latency_ms: None,
+            download_bps: None,
+            ..spec
+        };
+        assert_eq!(host_banner_metric_spans(&empty, &p).1, 0);
+    }
+
+    // ---- hover render precedence + distinct subtle style ----
+
+    fn two_card_hover_app() -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("beta")];
+        app.view.workspace_card_areas = vec![
+            crate::app::state::WorkspaceCardArea {
+                ws_idx: 0,
+                rect: Rect::new(0, 2, 40, 1),
+                indented: false,
+            },
+            crate::app::state::WorkspaceCardArea {
+                ws_idx: 1,
+                rect: Rect::new(0, 4, 40, 1),
+                indented: false,
+            },
+        ];
+        app
+    }
+
+    fn render_workspace_list_buffer(
+        app: &AppState,
+        is_navigating: bool,
+    ) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                    is_navigating,
+                )
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn render_selected_row_wins_over_hover() {
+        use crate::app::state::SidebarHoverTarget;
+        let mut app = two_card_hover_app();
+        // ws 0 is BOTH selected (navigating) and hovered → selection must win (surface0 + bold);
+        app.selected = 0;
+        app.active = None;
+        app.set_sidebar_hover(Some(SidebarHoverTarget::Workspace { ws_idx: 0 }));
+
+        let buf = render_workspace_list_buffer(&app, true);
+        let selected_cell = &buf[(1, 2)];
+        assert_eq!(selected_cell.style().bg, Some(app.palette.surface0));
+        assert_ne!(selected_cell.style().bg, Some(app.palette.hover_bg()));
+        // selection bolds the label (the name_style gate is untouched by hover).
+        let row0 = (0..40)
+            .map(|x| (x, &buf[(x, 2)]))
+            .find(|(_, c)| c.modifier.contains(Modifier::BOLD));
+        assert!(
+            row0.is_some(),
+            "selected row should render a BOLD label span"
+        );
+
+        // ws 1 is hovered ONLY (not selected/active) → hover_bg, and NOT bold.
+        let mut app = two_card_hover_app();
+        app.selected = 0;
+        app.active = None;
+        app.set_sidebar_hover(Some(SidebarHoverTarget::Workspace { ws_idx: 1 }));
+        let buf = render_workspace_list_buffer(&app, true);
+        let hovered_cell = &buf[(1, 4)];
+        assert_eq!(hovered_cell.style().bg, Some(app.palette.hover_bg()));
+        assert_ne!(hovered_cell.style().bg, Some(app.palette.surface0));
+        // hovered-only row must NOT bold its label.
+        let any_bold_on_hover_row = (0..40).any(|x| buf[(x, 4)].modifier.contains(Modifier::BOLD));
+        assert!(
+            !any_bold_on_hover_row,
+            "hovered-only row must not bold its label"
+        );
+    }
+
+    #[test]
+    fn render_active_row_wins_over_hover() {
+        use crate::app::state::SidebarHoverTarget;
+        // an active + hovered row renders the active surface_dim, not hover_bg (active wins).
+        let mut app = two_card_hover_app();
+        app.selected = 1;
+        app.active = Some(0);
+        app.set_sidebar_hover(Some(SidebarHoverTarget::Workspace { ws_idx: 0 }));
+        let buf = render_workspace_list_buffer(&app, true);
+        let active_cell = &buf[(1, 2)];
+        assert_eq!(active_cell.style().bg, Some(app.palette.surface_dim));
+        assert_ne!(active_cell.style().bg, Some(app.palette.hover_bg()));
+    }
+
+    #[test]
+    fn render_agent_hover_uses_hover_bg_when_not_active() {
+        use crate::app::state::SidebarHoverTarget;
+        // a hovered, non-active agent row renders hover_bg (active wins over hover, so make this
+        // row non-active by clearing `active`).
+        let mut app = AppState::test_new();
+        let ws = Workspace::test_new("test");
+        let pane = ws.tabs[0].root_pane;
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        app.active = None;
+        let details = agent_panel_entries_from(&app, &TerminalRuntimeRegistry::new());
+        assert!(!details.is_empty(), "agent panel should have an entry");
+
+        // hovered via the route-index (the flat global index of the first entry).
+        app.agent_panel_scroll = 0;
+        app.set_sidebar_hover(Some(SidebarHoverTarget::AgentRoute { route_idx: 0 }));
+
+        let backend = TestBackend::new(40, 9);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 9),
+                )
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // the first agent row sits in the agent-panel body. Find a cell whose bg == hover_bg.
+        let any_hover_bg = (0..9u16)
+            .any(|y| (0..40u16).any(|x| buf[(x, y)].style().bg == Some(app.palette.hover_bg())));
+        assert!(
+            any_hover_bg,
+            "hovered non-active agent row should render hover_bg"
+        );
+    }
+
+    // Hover adds NO second animation clock: a hover redraw rides the existing redraw path and
+    // reads `spinner_tick` only through the shared tick. Guard: this module introduces no
+    // hover-specific animation clock. Needles are assembled at runtime so the guard does not
+    // match itself.
+    #[test]
+    fn moved_event_cadence_no_second_clock() {
+        let src = include_str!("sidebar.rs");
+        let hover = "hover";
+        let needles = [
+            format!("{hover}_animation_interval"),
+            format!("{hover}_tick"),
+            format!("advance_{hover}_tick"),
+        ];
+        for needle in needles {
+            assert!(
+                !src.to_lowercase().contains(&needle),
+                "hover must not introduce a second animation clock (found `{needle}`)"
+            );
+        }
+    }
+
+    // ---- local→remote space divider ----
+
+    /// Build an ungrouped app where `client_workspace_remote[i]` aligns with `app.workspaces[i]`
+    /// and the entry stream's `ws_idx` equals the array index (no worktree grouping). Each card
+    /// is configured to a single render row so the divider geometry is deterministic.
+    fn divider_app(remote: &[bool]) -> AppState {
+        let mut app = AppState::test_new();
+        app.sidebar_spaces.rows = vec![vec![
+            crate::config::SpaceSidebarToken::StateIcon,
+            crate::config::SpaceSidebarToken::Workspace,
+        ]];
+        app.workspaces = remote
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Workspace::test_new(&format!("ws{i}")))
+            .collect();
+        app.client_workspace_remote = remote.to_vec();
+        app.active = None;
+        app.mode = Mode::Terminal;
+        app
+    }
+
+    fn divider_positions(entries: &[WorkspaceListEntry]) -> Vec<usize> {
+        entries
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| {
+                matches!(entry, WorkspaceListEntry::Divider { .. }).then_some(idx)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn workspace_list_entries_inserts_one_divider_at_local_remote_boundary() {
+        let app = divider_app(&[false, false, true, true]);
+        let entries = workspace_list_entries(&app);
+
+        let dividers = divider_positions(&entries);
+        assert_eq!(dividers.len(), 1, "exactly one divider: {entries:?}");
+        // ws_idx 1 (local) then the divider then ws_idx 2 (remote).
+        assert_eq!(
+            entries[dividers[0] - 1],
+            WorkspaceListEntry::Workspace {
+                ws_idx: 1,
+                indented: false
+            }
+        );
+        assert_eq!(
+            entries[dividers[0] + 1],
+            WorkspaceListEntry::Workspace {
+                ws_idx: 2,
+                indented: false
+            }
+        );
+        assert_eq!(
+            entries[dividers[0]],
+            WorkspaceListEntry::Divider { labeled: true }
+        );
+    }
+
+    #[test]
+    fn workspace_list_entries_no_divider_when_all_local() {
+        let app = divider_app(&[false, false, false]);
+        assert!(divider_positions(&workspace_list_entries(&app)).is_empty());
+    }
+
+    #[test]
+    fn workspace_list_entries_no_divider_when_all_remote() {
+        let app = divider_app(&[true, true, true]);
+        assert!(divider_positions(&workspace_list_entries(&app)).is_empty());
+    }
+
+    #[test]
+    fn workspace_list_entries_no_divider_when_marker_empty() {
+        // Monolithic mode: client_workspace_remote is empty even though workspaces exist.
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        app.client_workspace_remote = Vec::new();
+        app.active = None;
+        app.mode = Mode::Terminal;
+        assert!(divider_positions(&workspace_list_entries(&app)).is_empty());
+    }
+
+    #[test]
+    fn workspace_list_entries_no_divider_single_server_filter() {
+        // A single-server filter yields one uniform role group upstream, so the marker is
+        // all-true or all-false and no transition exists.
+        assert!(divider_positions(&workspace_list_entries(&divider_app(&[true, true]))).is_empty());
+        assert!(
+            divider_positions(&workspace_list_entries(&divider_app(&[false, false]))).is_empty()
+        );
+    }
+
+    #[test]
+    fn workspace_list_entries_divider_above_offline_remote_placeholder() {
+        // Offline/empty-remote placeholder rows carry is_remote == true, so the divider sits
+        // ABOVE them (the split shows before the remote finishes connecting).
+        let app = divider_app(&[false, true]);
+        let entries = workspace_list_entries(&app);
+        let dividers = divider_positions(&entries);
+        assert_eq!(dividers.len(), 1);
+        // divider immediately precedes the first (placeholder) remote entry.
+        assert_eq!(
+            entries[dividers[0] + 1],
+            WorkspaceListEntry::Workspace {
+                ws_idx: 1,
+                indented: false
+            }
+        );
+    }
+
+    #[test]
+    fn workspace_list_entries_divider_on_visual_order_with_grouped_local_worktrees() {
+        // Local grouped worktree members (parent + indented child) then a remote row: the
+        // divider lands after the LAST local entry by VISUAL order, before the first remote.
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+            Workspace::test_new("remote-space"),
+        ];
+        app.client_workspace_remote = vec![false, false, true];
+        app.active = None;
+        app.mode = Mode::Terminal;
+
+        let entries = workspace_list_entries(&app);
+        assert_eq!(
+            entries,
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: true
+                },
+                WorkspaceListEntry::Divider { labeled: true },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 2,
+                    indented: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_list_entries_divider_labeled_false_when_host_banner_active() {
+        let mut app = divider_app(&[false, true]);
+        app.host_banner_active = true;
+        let entries = workspace_list_entries(&app);
+        let dividers = divider_positions(&entries);
+        assert_eq!(dividers.len(), 1);
+        assert_eq!(
+            entries[dividers[0]],
+            WorkspaceListEntry::Divider { labeled: false }
+        );
+    }
+
+    #[test]
+    fn compute_workspace_list_areas_emits_no_card_for_divider() {
+        let app = divider_app(&[false, false, true, true]);
+        let (cards, _banners, divider_rows) =
+            compute_workspace_list_areas_full(&app, Rect::new(0, 0, 30, 24));
+        // One card per real workspace, none for the divider.
+        assert_eq!(cards.len(), app.workspaces.len());
+        assert_eq!(divider_rows.len(), 1);
+        // No card rect overlaps the divider y.
+        let divider_y = divider_rows[0];
+        assert!(cards
+            .iter()
+            .all(|card| !(divider_y >= card.rect.y && divider_y < card.rect.y + card.rect.height)));
+    }
+
+    #[test]
+    fn compute_workspace_list_areas_full_divider_row_consumes_one_row() {
+        let app = divider_app(&[false, true]);
+        let (cards, _banners, divider_rows) =
+            compute_workspace_list_areas_full(&app, Rect::new(0, 0, 30, 24));
+        assert_eq!(cards.len(), 2);
+        assert_eq!(divider_rows.len(), 1);
+        let last_local = &cards[0];
+        let first_remote = &cards[1];
+        let divider_y = divider_rows[0];
+        // The divider consumes exactly one row: it sits one row below the last local card's
+        // bottom (after the standard one-row inter-card gap), and the first remote card sits
+        // exactly one row below the divider — a tight one-row separator.
+        assert_eq!(divider_y, last_local.rect.y + last_local.rect.height + 1);
+        assert_eq!(first_remote.rect.y, divider_y + 1);
+    }
+
+    #[test]
+    fn divider_rows_match_render_and_hit_test_geometry() {
+        // The divider y from the single compute pass equals the gap between adjacent card
+        // rects, and the same geometry makes hit-test miss the divider row (render == hit_test).
+        let mut app = divider_app(&[false, true]);
+        let area = Rect::new(0, 0, 30, 20);
+        app.view.sidebar_rect = area;
+        let (cards, _banners, divider_rows) = compute_workspace_list_areas_full(&app, area);
+        app.view.workspace_card_areas = cards;
+        app.view.divider_rows = divider_rows;
+
+        let divider_y = app.view.divider_rows[0];
+        // No card covers the divider row.
+        assert!(app
+            .view
+            .workspace_card_areas
+            .iter()
+            .all(|card| !(divider_y >= card.rect.y && divider_y < card.rect.y + card.rect.height)));
+    }
+
+    #[test]
+    fn workspace_list_scroll_metrics_counts_divider_row() {
+        let app = divider_app(&[false, true]);
+        // Two real workspaces + one divider = three entry rows.
+        assert_eq!(workspace_list_entries(&app).len(), 3);
+        let metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 20));
+        assert_eq!(metrics.viewport_rows, 3);
+    }
+
+    #[test]
+    fn scrolling_does_not_desync_card_ws_idx_with_divider_present() {
+        let mut app = divider_app(&[false, false, true, true]);
+        let area = Rect::new(0, 0, 30, 6);
+        // Scroll past the first local workspace; every visible card's ws_idx must still map to
+        // the correct workspace (the divider does not shift card ws_idx).
+        app.workspace_scroll = normalized_workspace_scroll(&app, area, 2);
+        let (cards, _banners, _divider_rows) = compute_workspace_list_areas_full(&app, area);
+        for card in &cards {
+            assert!(card.ws_idx < app.workspaces.len());
+            // Cards keep their declared role per client_workspace_remote (no off-by-one).
+            assert_eq!(
+                app.client_workspace_remote[card.ws_idx],
+                card.ws_idx >= 2,
+                "card ws_idx {} role desynced",
+                card.ws_idx
+            );
+        }
+    }
+
+    fn render_divider_buffer(app: &AppState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    false,
+                )
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_row_text(buffer: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+        (0..width).map(|x| buffer[(x, y)].symbol()).collect()
+    }
+
+    fn prepared_divider_app(remote: &[bool], width: u16, height: u16) -> AppState {
+        let mut app = divider_app(remote);
+        let area = Rect::new(0, 0, width, height);
+        app.view.sidebar_rect = area;
+        let (cards, banners, divider_rows) = compute_workspace_list_areas_full(&app, area);
+        app.view.workspace_card_areas = cards;
+        app.view.host_banner_areas = banners;
+        app.view.divider_rows = divider_rows;
+        app
+    }
+
+    #[test]
+    fn render_writes_dim_remote_rule_in_labeled_mode() {
+        let app = prepared_divider_app(&[false, true], 30, 20);
+        let divider_y = app.view.divider_rows[0];
+        let buffer = render_divider_buffer(&app, 30, 20);
+
+        let row = buffer_row_text(&buffer, divider_y, 30);
+        assert!(row.contains('─'), "divider rule should draw `─`: {row:?}");
+        assert!(
+            row.contains("remote"),
+            "labeled divider should contain `remote`: {row:?}"
+        );
+        // The rule glyph is drawn in surface_dim.
+        let dim = app.palette.surface_dim;
+        assert!(
+            (0..30u16).any(|x| buffer[(x, divider_y)].symbol() == "─"
+                && buffer[(x, divider_y)].style().fg == Some(dim)),
+            "rule glyph should be dim"
+        );
+    }
+
+    #[test]
+    fn render_writes_plain_rule_in_plain_mode() {
+        let mut app = prepared_divider_app(&[false, true], 30, 20);
+        app.host_banner_active = true;
+        // Recompute entries/divider so the labeled flag flips (geometry unchanged: 1 row).
+        let area = app.view.sidebar_rect;
+        let (cards, banners, divider_rows) = compute_workspace_list_areas_full(&app, area);
+        app.view.workspace_card_areas = cards;
+        app.view.host_banner_areas = banners;
+        app.view.divider_rows = divider_rows;
+
+        let divider_y = app.view.divider_rows[0];
+        let buffer = render_divider_buffer(&app, 30, 20);
+        let row = buffer_row_text(&buffer, divider_y, 30);
+        assert!(row.contains('─'), "plain divider still draws `─`: {row:?}");
+        assert!(
+            !row.contains("remote"),
+            "plain divider must NOT contain `remote`: {row:?}"
+        );
+    }
+
+    #[test]
+    fn render_writes_no_divider_when_single_role_group() {
+        let app = prepared_divider_app(&[false, false], 30, 20);
+        assert!(app.view.divider_rows.is_empty());
+        let buffer = render_divider_buffer(&app, 30, 20);
+        // No row anywhere contains the `remote` label.
+        let any_remote = (0..20u16).any(|y| buffer_row_text(&buffer, y, 30).contains("remote"));
+        assert!(!any_remote, "all-local sidebar must render no divider");
+    }
+
+    // ---- host banner ----
+
+    use crate::app::state::{HostBannerSpec, HostBannerState};
+
+    /// Build an app like `divider_app` but with `host_banners`/`host_banner_rows`/
+    /// `host_banner_active` populated, mirroring what the client compositor does on the client
+    /// path. `banner_rows` are the `ws_idx`s the banners precede; `states` the per-banner state.
+    fn host_banner_app(
+        remote: &[bool],
+        banner_rows: &[usize],
+        states: &[HostBannerState],
+    ) -> AppState {
+        let mut app = divider_app(remote);
+        app.host_banner_rows = banner_rows.to_vec();
+        app.host_banners = banner_rows
+            .iter()
+            .zip(states.iter())
+            .enumerate()
+            .map(|(i, (_, state))| HostBannerSpec {
+                display_name: format!("host{i}"),
+                connection_state: *state,
+                space_count: 1,
+                latency_ms: None,
+                download_bps: None,
+            })
+            .collect();
+        app.host_banner_active = !banner_rows.is_empty();
+        app
+    }
+
+    fn banner_positions(entries: &[WorkspaceListEntry]) -> Vec<(usize, usize)> {
+        entries
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| match entry {
+                WorkspaceListEntry::HostBanner { banner_idx } => Some((idx, *banner_idx)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn host_banner_entry_emitted_per_remote_host() {
+        // Local ws 0, two remote hosts: host A's first row is ws 1, host B's first row is ws 2.
+        let app = host_banner_app(
+            &[false, true, true],
+            &[1, 2],
+            &[HostBannerState::Connected, HostBannerState::Connected],
+        );
+        let entries = workspace_list_entries(&app);
+        let banners = banner_positions(&entries);
+        assert_eq!(banners.len(), 2, "one banner per remote host: {entries:?}");
+        // banner_idx aligns with host_banners order.
+        assert_eq!(banners[0].1, 0);
+        assert_eq!(banners[1].1, 1);
+        // Each banner sits immediately before its host group's first workspace.
+        assert_eq!(
+            entries[banners[0].0 + 1],
+            WorkspaceListEntry::Workspace {
+                ws_idx: 1,
+                indented: false
+            }
+        );
+        assert_eq!(
+            entries[banners[1].0 + 1],
+            WorkspaceListEntry::Workspace {
+                ws_idx: 2,
+                indented: false
+            }
+        );
+        // The divider precedes the first banner (banner below divider).
+        let divider_idx = entries
+            .iter()
+            .position(|e| matches!(e, WorkspaceListEntry::Divider { .. }))
+            .expect("divider present");
+        assert!(divider_idx < banners[0].0, "divider above first banner");
+    }
+
+    #[test]
+    fn host_banner_no_entry_for_local_only() {
+        let app = host_banner_app(&[false, false], &[], &[]);
+        assert!(banner_positions(&workspace_list_entries(&app)).is_empty());
+    }
+
+    #[test]
+    fn divider_plain_when_banner_active() {
+        // When a banner is visible (host_banner_active) the divider flips to plain.
+        let app = host_banner_app(&[false, true], &[1], &[HostBannerState::Connected]);
+        let entries = workspace_list_entries(&app);
+        let divider = entries
+            .iter()
+            .find(|e| matches!(e, WorkspaceListEntry::Divider { .. }))
+            .expect("divider present");
+        assert_eq!(divider, &WorkspaceListEntry::Divider { labeled: false });
+
+        // Without a banner the divider is labeled.
+        let plain = divider_app(&[false, true]);
+        let labeled = workspace_list_entries(&plain)
+            .into_iter()
+            .find(|e| matches!(e, WorkspaceListEntry::Divider { .. }))
+            .expect("divider present");
+        assert_eq!(labeled, WorkspaceListEntry::Divider { labeled: true });
+    }
+
+    #[test]
+    fn compute_areas_render_equals_hit_test() {
+        // The render==hit_test invariant for the host banner: compute_workspace_list_areas_full
+        // emits NO WorkspaceCardArea for HostBanner/Divider; HostBanner pushes exactly one
+        // HostBannerArea at the right y (one row); Divider pushes nothing to the banner slot.
+        let app = host_banner_app(&[false, true], &[1], &[HostBannerState::Connected]);
+        let area = Rect::new(0, 0, 30, 24);
+        let (cards, banners, divider_rows) = compute_workspace_list_areas_full(&app, area);
+        // One card per real workspace — none for banner/divider.
+        assert_eq!(cards.len(), app.workspaces.len());
+        assert_eq!(banners.len(), 1, "one HostBannerArea");
+        assert_eq!(divider_rows.len(), 1, "one divider row");
+        let banner_y = banners[0].rect.y;
+        assert_eq!(banners[0].rect.height, 1, "banner consumes one row");
+        assert_eq!(banners[0].banner_idx, 0);
+        // No card overlaps the banner row.
+        assert!(cards
+            .iter()
+            .all(|card| !(banner_y >= card.rect.y && banner_y < card.rect.y + card.rect.height)));
+        // Banner sits below the divider, above the remote card.
+        assert!(divider_rows[0] < banner_y);
+        let first_remote = cards.iter().find(|c| c.ws_idx == 1).unwrap();
+        assert!(banner_y < first_remote.rect.y);
+
+        // The two-tuple compute_workspace_list_areas agrees with the full pass (same geometry).
+        let (cards2, banners2) = compute_workspace_list_areas(&app, area);
+        assert_eq!(cards2.len(), cards.len());
+        assert_eq!(banners2, banners);
+    }
+
+    #[test]
+    fn host_banner_rgb_deterministic() {
+        // Fixed inputs → fixed RGB; advancing tick (speed>0) or char_index changes color.
+        let a = host_banner_rgb(0, 0, HOST_BANNER_FREQ, 0.1);
+        let b = host_banner_rgb(0, 0, HOST_BANNER_FREQ, 0.1);
+        assert_eq!(a, b, "deterministic for fixed inputs");
+        assert_ne!(
+            a,
+            host_banner_rgb(50, 0, HOST_BANNER_FREQ, 0.1),
+            "advancing tick changes color"
+        );
+        assert_ne!(
+            a,
+            host_banner_rgb(0, 4, HOST_BANNER_FREQ, 0.1),
+            "advancing char_index changes color"
+        );
+    }
+
+    #[test]
+    fn host_banner_rgb_luma_floor() {
+        // Every channel stays at/above the legibility floor across a sweep of tick/char_index.
+        let floor = (HOST_BANNER_MIN_LUMA * 255.0).floor() as u8;
+        for tick in 0u32..40 {
+            for idx in 0usize..16 {
+                let (r, g, b) = host_banner_rgb(tick, idx, HOST_BANNER_FREQ, 0.1);
+                assert!(
+                    r >= floor && g >= floor && b >= floor,
+                    "near-black at {tick}/{idx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_banner_static_ignores_tick() {
+        let p = Palette::catppuccin();
+        let colors = |spans: &[Span<'static>]| spans.iter().map(|s| s.style.fg).collect::<Vec<_>>();
+
+        // Static (speed 0): tick 0 == tick N.
+        let static_cfg = crate::config::SidebarHostConfig {
+            animation: crate::config::HostBannerAnimation::Static,
+            ..Default::default()
+        };
+        let at_0 = host_banner_spans("demo", 0, &static_cfg, &p);
+        let at_n = host_banner_spans("demo", 64, &static_cfg, &p);
+        assert_eq!(colors(&at_0), colors(&at_n), "static ignores tick");
+
+        // Animated: tick 0 differs from tick N.
+        let anim_cfg = crate::config::SidebarHostConfig {
+            animation: crate::config::HostBannerAnimation::Animated,
+            speed: crate::config::HostBannerSpeed::Lively,
+            ..Default::default()
+        };
+        let anim_0 = host_banner_spans("demo", 0, &anim_cfg, &p);
+        let anim_n = host_banner_spans("demo", 64, &anim_cfg, &p);
+        assert_ne!(
+            colors(&anim_0),
+            colors(&anim_n),
+            "animated advances with tick"
+        );
+    }
+
+    #[test]
+    fn host_banner_non_rainbow_uses_base_color() {
+        let p = Palette::catppuccin();
+        // Rainbow → no base (full sweep).
+        assert!(host_banner_base_color(crate::config::HostBannerGradient::Rainbow, &p).is_none());
+        // Solid presets derive from the matching palette colors.
+        assert_eq!(
+            host_banner_base_color(crate::config::HostBannerGradient::Accent, &p),
+            Some(p.accent)
+        );
+        assert_eq!(
+            host_banner_base_color(crate::config::HostBannerGradient::Cool, &p),
+            Some(p.teal)
+        );
+        assert_eq!(
+            host_banner_base_color(crate::config::HostBannerGradient::Warm, &p),
+            Some(p.peach)
+        );
+        assert_eq!(
+            host_banner_base_color(crate::config::HostBannerGradient::Muted, &p),
+            Some(p.overlay1)
+        );
+    }
+
+    fn prepared_host_banner_app(
+        remote: &[bool],
+        banner_rows: &[usize],
+        states: &[HostBannerState],
+        width: u16,
+        height: u16,
+    ) -> AppState {
+        let mut app = host_banner_app(remote, banner_rows, states);
+        let area = Rect::new(0, 0, width, height);
+        app.view.sidebar_rect = area;
+        let (cards, banners, divider_rows) = compute_workspace_list_areas_full(&app, area);
+        app.view.workspace_card_areas = cards;
+        app.view.host_banner_areas = banners;
+        app.view.divider_rows = divider_rows;
+        app
+    }
+
+    #[test]
+    fn connected_banner_renders_rgb_name_span() {
+        let mut app =
+            prepared_host_banner_app(&[false, true], &[1], &[HostBannerState::Connected], 40, 20);
+        app.host_banners[0].display_name = "prod".into();
+        app.host_banners[0].space_count = 2;
+        app.sidebar_host.show_count = true;
+        let banner_y = app.view.host_banner_areas[0].rect.y;
+        let buffer = render_divider_buffer(&app, 40, 20);
+
+        // The host name renders as bold Color::Rgb cells.
+        let mut found_rgb_bold = false;
+        for x in 0..40u16 {
+            let cell = &buffer[(x, banner_y)];
+            if matches!(cell.style().fg, Some(Color::Rgb(_, _, _)))
+                && cell.style().add_modifier.contains(Modifier::BOLD)
+                && cell.symbol() != " "
+            {
+                found_rgb_bold = true;
+            }
+        }
+        assert!(found_rgb_bold, "banner name should be bold Color::Rgb");
+
+        let row = buffer_row_text(&buffer, banner_y, 40);
+        assert!(row.contains("prod"), "banner shows host name: {row:?}");
+        assert!(row.contains('◆'), "connected glyph `◆`: {row:?}");
+        assert!(
+            row.contains("2 spaces"),
+            "show_count suffix `· 2 spaces`: {row:?}"
+        );
+    }
+
+    #[test]
+    fn remote_spaces_sit_under_banner_local_has_none() {
+        // The single remote host group (ws 1 & 2) is introduced by exactly one banner above its
+        // first row; the local space (ws 0) is the first entry with no banner above it.
+        let mut app = host_banner_app(&[false, true, true], &[1], &[HostBannerState::Connected]);
+        app.host_banner_rows = vec![1]; // one host group starting at ws 1
+        let entries = workspace_list_entries(&app);
+
+        // Local space is the first entry; nothing precedes it.
+        assert_eq!(
+            entries.first(),
+            Some(&WorkspaceListEntry::Workspace {
+                ws_idx: 0,
+                indented: false
+            })
+        );
+        // Exactly one banner, and it sits before the first remote workspace (ws 1).
+        let banners = banner_positions(&entries);
+        assert_eq!(banners.len(), 1);
+        assert_eq!(
+            entries[banners[0].0 + 1],
+            WorkspaceListEntry::Workspace {
+                ws_idx: 1,
+                indented: false
+            }
+        );
+        // The second remote space (ws 2) follows under the same group, with no extra banner.
+        assert!(entries
+            .iter()
+            .any(|e| matches!(e, WorkspaceListEntry::Workspace { ws_idx: 2, .. })));
+    }
+
+    #[test]
+    fn host_drag_draws_drop_indicator_at_host_boundary() {
+        // A live HostReorder drag draws the accent drop line at a host boundary (one row above
+        // the banner) and lifts the dragged host's banner row with surface1.
+        let mut app =
+            prepared_host_banner_app(&[false, true], &[1], &[HostBannerState::Connected], 30, 20);
+        app.drag = Some(crate::app::state::DragState {
+            target: crate::app::state::DragTarget::HostReorder {
+                source_host_idx: 0,
+                insert_idx: Some(0),
+            },
+        });
+        let area = Rect::new(0, 0, 30, 20);
+        let banner_y = app.view.host_banner_areas[0].rect.y;
+        let indicator_y = host_drop_indicator_row(&app.view.host_banner_areas, area, 0)
+            .expect("host boundary row");
+        assert_eq!(indicator_y, banner_y - 1, "boundary sits above the banner");
+        // insert at the end of the host list resolves to the row below the last banner.
+        assert_eq!(
+            host_drop_indicator_row(&app.view.host_banner_areas, area, 1),
+            Some(banner_y),
+        );
+
+        let buffer = render_divider_buffer(&app, 30, 20);
+        assert!(
+            (0..30u16).any(|x| buffer[(x, indicator_y)].symbol() == "─"
+                && buffer[(x, indicator_y)].style().fg == Some(app.palette.accent)),
+            "accent drop indicator drawn at the host boundary"
+        );
+        assert!(
+            (0..30u16).any(|x| buffer[(x, banner_y)].style().bg == Some(app.palette.surface1)),
+            "dragged host banner row lifts with surface1"
+        );
+    }
+
+    #[test]
+    fn settings_host_demo_line_tracks_glyph_and_count() {
+        let mut app = AppState::test_new();
+        app.sidebar_host.show_count = true;
+        let line = settings_sidebar_host_demo_line(&app);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("demo"), "demo name rendered: {text:?}");
+        assert!(text.contains('◆'), "left glyph rendered: {text:?}");
+        assert!(text.contains("3 spaces"), "count suffix rendered: {text:?}");
+
+        app.sidebar_host.glyph = crate::config::HostBannerGlyph::None;
+        app.sidebar_host.show_count = false;
+        let line = settings_sidebar_host_demo_line(&app);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains('◆'), "glyph hidden: {text:?}");
+        assert!(!text.contains("spaces"), "count hidden: {text:?}");
     }
 }

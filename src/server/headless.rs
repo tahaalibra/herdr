@@ -5881,6 +5881,26 @@ next_tab = ""
     }
 
     #[test]
+    fn embedded_virtual_render_omits_sidebar_and_uses_full_width_content() {
+        let mut state = AppState::test_new();
+        state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Terminal;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let (buffer, _cursor) =
+            crate::server::render_stream::render_embedded_content_virtual(&mut state, area, true);
+
+        assert_eq!(buffer.area.width, 80);
+        assert_eq!(buffer.area.height, 24);
+        assert_eq!(state.view.sidebar_rect, Rect::default());
+        assert!(state.view.workspace_card_areas.is_empty());
+        assert_eq!(state.view.tab_bar_rect, Rect::new(0, 0, 80, 1));
+        assert_eq!(state.view.terminal_area, Rect::new(0, 1, 80, 23));
+    }
+
+    #[test]
     fn virtual_render_without_frame_cursor_keeps_cursor_hidden() {
         let mut state = AppState::test_new();
         let area = Rect::new(0, 0, 80, 24);
@@ -6818,6 +6838,39 @@ next_tab = ""
 
         assert_eq!((desktop_frame.width, desktop_frame.height), (120, 40));
         assert_eq!((phone_frame.width, phone_frame.height), (80, 24));
+    }
+
+    #[test]
+    fn render_and_stream_uses_embedded_app_surface_mode() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+
+        let (writer, _control_rx, render_rx) = test_client_writer();
+        let mut connection = ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(writer),
+        );
+        connection.surface_mode = crate::protocol::ClientSurfaceMode::EmbeddedContent;
+        server.clients.insert(1, connection);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        server.render_and_stream();
+        let frame = read_server_frame(render_rx.recv().expect("embedded frame"));
+
+        assert_eq!((frame.width, frame.height), (80, 24));
+        assert_eq!(server.app.state.view.sidebar_rect, Rect::default());
+        assert_eq!(server.app.state.view.tab_bar_rect, Rect::new(0, 0, 80, 1));
+        assert_eq!(server.app.state.view.terminal_area, Rect::new(0, 1, 80, 23));
     }
 
     #[tokio::test]

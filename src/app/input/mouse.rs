@@ -808,6 +808,9 @@ impl AppState {
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }
                         | DragTarget::KeybindHelpScrollbar { .. } => {}
+                        // Host reorder is a client-only drag (the thin client owns host
+                        // order). The monolithic host never produces it.
+                        DragTarget::HostReorder { .. } => {}
                     }
                 }
             }
@@ -988,6 +991,9 @@ impl AppState {
             }
 
             MouseEventKind::Moved if self.mode == Mode::Terminal && !in_sidebar => {
+                // Motion into the content area leaves any sidebar hover behind before the
+                // event forwards to the pane under the cursor.
+                self.set_sidebar_hover(None);
                 if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     let _ = self.forward_pane_mouse_motion(terminal_runtimes, &info, mouse);
                 }
@@ -1096,6 +1102,22 @@ impl AppState {
                     });
                     self.mode = Mode::ContextMenu;
                 }
+            }
+
+            // Sidebar mouse-hover. Reaches here only for navigate-ish modes
+            // (Settings/GlobalMenu/ContextMenu/KeybindHelp/the worktree+confirm modals are handled
+            // or early-returned above) and after the mobile/pane-motion arms. Resolve the hover via
+            // the SAME geometry the click path uses (dividers skipped); affordances hover only when
+            // drawn (`mouse_capture` + `launcher_enabled`). Off-sidebar / collapsed clears it. The
+            // monolithic UI repaints each tick reading `sidebar_hover`; no explicit repaint needed.
+            MouseEventKind::Moved => {
+                let next = if in_sidebar && !self.sidebar_collapsed {
+                    let affordances_drawn = self.mouse_capture && launcher_enabled;
+                    self.resolve_sidebar_hover(mouse.column, mouse.row, affordances_drawn)
+                } else {
+                    None
+                };
+                self.set_sidebar_hover(next);
             }
 
             _ => {}
@@ -3719,5 +3741,170 @@ mod tests {
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);
+    }
+
+    // ---- monolithic sidebar mouse-hover ----
+
+    fn two_workspace_sidebar_app() -> crate::app::App {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("beta")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        app
+    }
+
+    #[test]
+    fn monolithic_moved_over_workspace_sets_hover_only() {
+        use crate::app::state::SidebarHoverTarget;
+        let mut app = two_workspace_sidebar_app();
+        let before_active = app.state.active;
+        let before_selected = app.state.selected;
+
+        let card = app
+            .state
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|c| c.ws_idx == 1)
+            .copied()
+            .expect("second workspace card");
+        app.handle_mouse(mouse(MouseEventKind::Moved, card.rect.x + 1, card.rect.y));
+
+        assert_eq!(
+            app.state.sidebar_hover,
+            Some(SidebarHoverTarget::Workspace { ws_idx: 1 })
+        );
+        // hover must NOT switch the active/selected workspace.
+        assert_eq!(app.state.active, before_active);
+        assert_eq!(app.state.selected, before_selected);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn monolithic_moved_resolves_agent_mono() {
+        use crate::app::state::SidebarHoverTarget;
+        // a workspace with a detected agent so the agent panel has an entry row.
+        let mut app = app_for_mouse_test();
+        let ws = Workspace::test_new("test");
+        let pane = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        // find an agent row via the SAME geometry the click path uses.
+        let detail_area = app.state.agent_panel_rect();
+        let body = crate::ui::agent_panel_body_rect(
+            detail_area,
+            crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
+                &app.state,
+                detail_area,
+            )),
+        );
+        let (target, row) = (body.y..body.y + body.height)
+            .find_map(|row| {
+                app.state
+                    .agent_detail_target_at(row)
+                    .map(|target| (target, row))
+            })
+            .expect("an agent entry row should resolve");
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, body.x + 1, row));
+
+        let (ws_idx, tab_idx, pane_id) = target;
+        assert_eq!(
+            app.state.sidebar_hover,
+            Some(SidebarHoverTarget::AgentMono {
+                ws_idx,
+                tab_idx,
+                pane_id,
+            })
+        );
+    }
+
+    #[test]
+    fn monolithic_moved_off_sidebar_and_collapsed_clears() {
+        use crate::app::state::SidebarHoverTarget;
+        let mut app = two_workspace_sidebar_app();
+
+        // establish a hover over a workspace card.
+        let card = app.state.view.workspace_card_areas[0];
+        app.handle_mouse(mouse(MouseEventKind::Moved, card.rect.x + 1, card.rect.y));
+        assert!(matches!(
+            app.state.sidebar_hover,
+            Some(SidebarHoverTarget::Workspace { .. })
+        ));
+
+        // motion into the content area (outside the sidebar) clears the hover.
+        let content_col = app.state.view.terminal_area.x + 2;
+        app.handle_mouse(mouse(MouseEventKind::Moved, content_col, 3));
+        assert_eq!(app.state.sidebar_hover, None);
+
+        // with the sidebar collapsed, motion over the (former) sidebar column also clears it.
+        app.handle_mouse(mouse(MouseEventKind::Moved, card.rect.x + 1, card.rect.y));
+        assert!(app.state.sidebar_hover.is_some());
+        app.state.sidebar_collapsed = true;
+        app.handle_mouse(mouse(MouseEventKind::Moved, card.rect.x + 1, card.rect.y));
+        assert_eq!(app.state.sidebar_hover, None);
+    }
+
+    #[test]
+    fn monolithic_moved_affordances_respect_mouse_capture_gate() {
+        use crate::app::state::SidebarHoverTarget;
+        let mut app = two_workspace_sidebar_app();
+
+        // affordances drawn (mouse_capture true): the ` new` button hovers New.
+        app.state.mouse_capture = true;
+        let new_rect = app.state.sidebar_new_button_rect();
+        app.handle_mouse(mouse(MouseEventKind::Moved, new_rect.x, new_rect.y));
+        assert_eq!(app.state.sidebar_hover, Some(SidebarHoverTarget::New));
+
+        // draw gate off: the affordance is not drawn, so it does not hover.
+        app.state.set_sidebar_hover(None);
+        app.state.mouse_capture = false;
+        app.handle_mouse(mouse(MouseEventKind::Moved, new_rect.x, new_rect.y));
+        assert_ne!(app.state.sidebar_hover, Some(SidebarHoverTarget::New));
+    }
+
+    #[test]
+    fn click_unaffected_by_hover() {
+        // a Down(Left) over a hovered row still switches the workspace exactly as today.
+        let mut app = two_workspace_sidebar_app();
+        let card = app
+            .state
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|c| c.ws_idx == 1)
+            .copied()
+            .expect("second workspace card");
+
+        // hover the row first.
+        app.handle_mouse(mouse(MouseEventKind::Moved, card.rect.x + 1, card.rect.y));
+        // then click + release it.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 1,
+            card.rect.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            card.rect.x + 1,
+            card.rect.y,
+        ));
+        assert_eq!(app.state.selected, 1);
     }
 }
