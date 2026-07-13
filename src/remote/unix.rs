@@ -892,7 +892,9 @@ fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshO
         .arg("-o")
         .arg("ControlMaster=auto")
         .arg("-o")
-        .arg("ControlPersist=yes");
+        // Bounded, not "yes": a master orphaned by a killed client must
+        // self-expire once its last session closes instead of living forever.
+        .arg("ControlPersist=60");
 }
 
 impl InstallSource {
@@ -2196,6 +2198,11 @@ struct SshStdioBridge {
     local_socket: PathBuf,
     should_stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// PIDs of the live per-connection ssh children. Killed on drop: an
+    /// established bridge pipe otherwise outlives remote removal/disable —
+    /// the local ssh child and the remote `remote-*-bridge` process both
+    /// linger until the client exits, because nothing else closes the pipe.
+    live_children: Arc<std::sync::Mutex<Vec<u32>>>,
 }
 
 fn spawn_bridge_worker(
@@ -2224,6 +2231,8 @@ impl SshStdioBridge {
 
         let should_stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&should_stop);
+        let live_children = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let thread_children = Arc::clone(&live_children);
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
@@ -2237,6 +2246,7 @@ impl SshStdioBridge {
                         let worker_ssh = Arc::clone(&ssh);
                         let worker_remote_herdr = remote_herdr.clone();
                         let worker_session_name = session_name.clone();
+                        let worker_children = Arc::clone(&thread_children);
                         spawn_bridge_worker(stream, move |stream| {
                             bridge_connection(
                                 stream,
@@ -2244,6 +2254,7 @@ impl SshStdioBridge {
                                 &worker_remote_herdr,
                                 &worker_session_name,
                                 kind,
+                                &worker_children,
                             )
                         });
                     }
@@ -2262,6 +2273,7 @@ impl SshStdioBridge {
             local_socket,
             should_stop,
             thread: Some(thread),
+            live_children,
         })
     }
 }
@@ -2270,8 +2282,26 @@ impl Drop for SshStdioBridge {
     fn drop(&mut self) {
         self.should_stop.store(true, Ordering::Release);
         let _ = std::fs::remove_file(&self.local_socket);
+        // Terminate the live per-connection ssh children so their remote
+        // `remote-*-bridge` counterparts exit too; the workers observe the
+        // child exit, close their streams, and unwind.
+        terminate_tracked_children(&self.live_children);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+    }
+}
+
+/// SIGTERM every tracked child pid. Factored out of `SshStdioBridge::drop`
+/// so the kill path is unit-testable with a real spawned child.
+fn terminate_tracked_children(children: &std::sync::Mutex<Vec<u32>>) {
+    let Ok(children) = children.lock() else {
+        return;
+    };
+    for pid in children.iter() {
+        // SAFETY: plain kill(2) on a pid we spawned and still track.
+        unsafe {
+            libc::kill(*pid as libc::pid_t, libc::SIGTERM);
         }
     }
 }
@@ -2377,6 +2407,7 @@ fn bridge_connection(
     remote_herdr: &RemoteHerdr,
     session_name: &str,
     kind: RemoteBridgeKind,
+    live_children: &std::sync::Mutex<Vec<u32>>,
 ) -> io::Result<()> {
     let mut command = ssh.command();
     command.arg(remote_bridge_command(remote_herdr, session_name, kind));
@@ -2392,6 +2423,10 @@ fn bridge_connection(
     let mut child = command
         .spawn()
         .map_err(|err| io::Error::new(err.kind(), format!("failed to start ssh bridge: {err}")))?;
+    let child_pid = child.id();
+    if let Ok(mut children) = live_children.lock() {
+        children.push(child_pid);
+    }
     let mut child_stdin = child
         .stdin
         .take()
@@ -2411,7 +2446,11 @@ fn bridge_connection(
         let _ = child_to_stream.shutdown(std::net::Shutdown::Write);
     });
 
-    let status = child.wait()?;
+    let status = child.wait();
+    if let Ok(mut children) = live_children.lock() {
+        children.retain(|pid| *pid != child_pid);
+    }
+    let status = status?;
     let _ = upload.join();
     let _ = download.join();
 
@@ -2573,6 +2612,36 @@ fn sanitize_path_component(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminate_tracked_children_kills_live_child() {
+        // A tracked child must die on bridge drop; otherwise removal/disable
+        // leaks the local ssh and the remote bridge process until client exit.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let children = std::sync::Mutex::new(vec![child.id()]);
+
+        terminate_tracked_children(&children);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match child.try_wait().expect("try_wait") {
+                Some(status) => {
+                    assert!(!status.success(), "sleep should be terminated, not exit 0");
+                    break;
+                }
+                None if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                None => panic!("tracked child survived terminate_tracked_children"),
+            }
+        }
+    }
 
     fn plain_remote_ssh(target: SshTarget) -> RemoteSsh {
         RemoteSsh {
@@ -2951,7 +3020,7 @@ mod tests {
                 "-o".to_string(),
                 "ControlMaster=auto".to_string(),
                 "-o".to_string(),
-                "ControlPersist=yes".to_string(),
+                "ControlPersist=60".to_string(),
                 "-o".to_string(),
                 "ConnectTimeout=10".to_string(),
                 "-T".to_string(),

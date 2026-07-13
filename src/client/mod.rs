@@ -5390,14 +5390,21 @@ async fn run_client_loop(
                     )));
                 }
                 teardown_secondary_connection(&mut state, &mut server_writes, &server_id);
+                let mut reconnect_candidate = false;
                 if let Some(model) = &mut state.supervisor_model {
                     let _ = model.set_connection_state(
                         &server_id,
                         supervisor::ConnectionState::Disconnected,
                     );
+                    reconnect_candidate = model.is_reconnect_candidate(&server_id);
                     state.request_full_redraw();
                 }
-                schedule_secondary_retry(&mut state, server_id, 0, Instant::now());
+                // A disconnect for a server the user just removed or disabled is
+                // the EXPECTED result of tearing its bridges down — scheduling a
+                // retry here would resurrect them.
+                if reconnect_candidate {
+                    schedule_secondary_retry(&mut state, server_id, 0, Instant::now());
+                }
                 render_cached_composited_frame(&mut state);
             }
             #[cfg(windows)]

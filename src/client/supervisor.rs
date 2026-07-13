@@ -2143,6 +2143,13 @@ impl ClientSupervisorModel {
         self.servers.iter().find(|server| &server.id == id)
     }
 
+    /// Whether `id` is still a registered, enabled server — i.e. a valid
+    /// reconnect candidate. False for removed and disabled remotes, so the
+    /// client never schedules retries that would resurrect torn-down bridges.
+    pub(crate) fn is_reconnect_candidate(&self, id: &ServerId) -> bool {
+        self.server(id).is_some_and(|server| !server.disabled)
+    }
+
     #[cfg(test)]
     pub(crate) fn server_for_test(&self, id: &ServerId) -> Option<&ManagedServer> {
         self.server(id)
@@ -3853,6 +3860,39 @@ mod tests {
                 }],
             }]
         );
+    }
+
+    #[test]
+    fn is_reconnect_candidate_tracks_registry_membership_and_enablement() {
+        let mut model = ClientSupervisorModel::new("local");
+        let remote_id = model.add_secondary(crate::remote_registry::RemoteDefinitionSnapshot {
+            id: "remote-x".into(),
+            name: "x".into(),
+            target: crate::remote_registry::RemoteTargetSnapshot::Local {
+                session: Some("x".into()),
+            },
+            session: None,
+            keybindings: crate::remote_registry::RemoteKeybindingsSnapshot::Local,
+            disabled: false,
+        });
+        assert!(model.is_reconnect_candidate(&remote_id));
+
+        // Disabled: still registered, but not a candidate.
+        model.sync_remote_registry(vec![crate::remote_registry::RemoteDefinitionSnapshot {
+            id: "remote-x".into(),
+            name: "x".into(),
+            target: crate::remote_registry::RemoteTargetSnapshot::Local {
+                session: Some("x".into()),
+            },
+            session: None,
+            keybindings: crate::remote_registry::RemoteKeybindingsSnapshot::Local,
+            disabled: true,
+        }]);
+        assert!(!model.is_reconnect_candidate(&remote_id));
+
+        // Removed: unknown ids are never candidates.
+        model.remove_secondary(&remote_id);
+        assert!(!model.is_reconnect_candidate(&remote_id));
     }
 
     #[test]
