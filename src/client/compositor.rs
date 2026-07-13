@@ -1500,16 +1500,26 @@ impl ClientSidebarSnapshot {
         // renderer walks (which may reorder entries under the priority sort).
         let mut per_ws_pane_routes: Vec<HashMap<crate::layout::PaneId, AgentRoute>> = Vec::new();
         let mut active_idx = None;
-        // #20: in mixed-remote mode every connected server independently reports its own focused
-        // workspace, so multiple `workspace_rows()` can carry `row.focused == true`. A plain
-        // last-wins on `row.focused || agent-focused` let a trailing remote's *workspace*-focused
-        // row override the local row that actually owns the user's focused agent. Rank the focus
-        // signal so an agent-focused row always beats a merely workspace-focused one; ties keep
-        // last-wins (the existing optimistic-focus / divider tests rely on a later agent-focused
-        // row winning).
+        // #20: EVERY connected server permanently reports a focused workspace and a focused
+        // pane — focus flags are per-server facts, not "which server is the user looking at".
+        // Only the ACTIVE server's rows may claim the sidebar highlight: without this gate, a
+        // later host's always-focused row steals the selected styling from the workspace/agent
+        // actually on screen (spaces AND agents both key off `app.active`). Within the active
+        // server, an agent-focused row outranks a merely workspace-focused one; ties keep
+        // last-wins (the optimistic-focus override relies on it, and `focus_workspace_route`
+        // switches the active server before flipping row focus, so optimistic focus stays
+        // covered by the gate).
+        let active_server = model.active_server_id().clone();
         let mut active_rank = 0u8; // 0 = none, 1 = workspace-focused, 2 = agent-focused
+                                   // Fallback highlight when the active server reports no focused row (e.g. its rows are
+                                   // disconnected placeholders): its first row still marks which host owns the view.
+        let mut active_server_first_idx = None;
         let workspace_rows = model.workspace_rows();
         for (idx, row) in workspace_rows.into_iter().enumerate() {
+            let row_on_active_server = row.server_id == active_server;
+            if row_on_active_server && active_server_first_idx.is_none() {
+                active_server_first_idx = Some(idx);
+            }
             let agents = row
                 .workspace_id
                 .as_ref()
@@ -1525,7 +1535,7 @@ impl ClientSidebarSnapshot {
             } else {
                 0
             };
-            if row_rank > 0 && row_rank >= active_rank {
+            if row_on_active_server && row_rank > 0 && row_rank >= active_rank {
                 active_idx = Some(idx);
                 active_rank = row_rank;
             }
@@ -1607,7 +1617,10 @@ impl ClientSidebarSnapshot {
         }
 
         if !app.workspaces.is_empty() {
-            let selected = active_idx.unwrap_or(0).min(app.workspaces.len() - 1);
+            let selected = active_idx
+                .or(active_server_first_idx)
+                .unwrap_or(0)
+                .min(app.workspaces.len() - 1);
             app.active = Some(selected);
             app.selected = selected;
         }
@@ -4219,6 +4232,109 @@ mod tests {
         assert!(snapshot.app.workspaces[remote_idx]
             .focused_pane_id()
             .is_some());
+    }
+
+    #[test]
+    fn later_hosts_own_focus_does_not_steal_the_highlight() {
+        // Every connected server permanently reports its own focused workspace + focused
+        // agent. With the user on the MAIN server, a later remote's focused rows must not
+        // claim `app.active`/`app.selected` (which drive both the spaces AND agents
+        // highlights) — the regression showed the last host's agent rendered as selected
+        // while a main-server pane was actually on screen.
+        let mut model = ClientSupervisorModel::new("local");
+        let remote_id = model.add_secondary(crate::remote_registry::RemoteDefinitionSnapshot {
+            id: "remote-x".into(),
+            name: "x".into(),
+            target: crate::remote_registry::RemoteTargetSnapshot::Local {
+                session: Some("x".into()),
+            },
+            session: None,
+            keybindings: crate::remote_registry::RemoteKeybindingsSnapshot::Local,
+            disabled: false,
+        });
+        model
+            .set_summary(
+                &ServerId::main(),
+                ServerSummary {
+                    workspaces: vec![
+                        WorkspaceSummary {
+                            workspace_id: "main-dev".into(),
+                            label: "dev".into(),
+                            branch: None,
+                            focused: true,
+                            ..Default::default()
+                        },
+                        WorkspaceSummary {
+                            workspace_id: "main-learn".into(),
+                            label: "learn".into(),
+                            branch: None,
+                            focused: false,
+                            ..Default::default()
+                        },
+                    ],
+                    agents: vec![AgentSummary {
+                        agent_id: "main-agent".into(),
+                        workspace_id: "main-dev".into(),
+                        label: "grok".into(),
+                        status: "working".into(),
+                        focused: true,
+                    }],
+                },
+            )
+            .unwrap();
+        // The remote also reports a focused workspace AND a focused agent — its permanent
+        // per-server facts, not a user focus change.
+        model
+            .set_summary(
+                &remote_id,
+                ServerSummary {
+                    workspaces: vec![WorkspaceSummary {
+                        workspace_id: "remote-herdr".into(),
+                        label: "herdr".into(),
+                        branch: None,
+                        focused: true,
+                        ..Default::default()
+                    }],
+                    agents: vec![AgentSummary {
+                        agent_id: "remote-agent".into(),
+                        workspace_id: "remote-herdr".into(),
+                        label: "grok".into(),
+                        status: "working".into(),
+                        focused: true,
+                    }],
+                },
+            )
+            .unwrap();
+        assert_eq!(model.active_server_id(), &ServerId::main());
+
+        let compositor = ClientCompositor::new(26);
+        let snapshot =
+            ClientSidebarSnapshot::from_model(&model, &compositor, 26, 60, 20, Instant::now());
+
+        // The main server's focused workspace row (flat index 0) owns the highlight, and its
+        // focused pane is the highlighted agent row — NOT the remote's trailing focused pair.
+        let main_idx = model
+            .workspace_rows()
+            .iter()
+            .position(|row| row.workspace_id.as_deref() == Some("main-dev"))
+            .expect("main dev row present");
+        assert_eq!(snapshot.app.active, Some(main_idx));
+        assert_eq!(snapshot.app.selected, main_idx);
+        assert!(snapshot.app.workspaces[main_idx]
+            .focused_pane_id()
+            .is_some());
+
+        // Switching the active server moves the highlight to the remote's focused row.
+        model.focus_workspace_route(&remote_id, "remote-herdr");
+        let snapshot =
+            ClientSidebarSnapshot::from_model(&model, &compositor, 26, 60, 20, Instant::now());
+        let remote_idx = model
+            .workspace_rows()
+            .iter()
+            .position(|row| row.workspace_id.as_deref() == Some("remote-herdr"))
+            .expect("remote herdr row present");
+        assert_eq!(snapshot.app.active, Some(remote_idx));
+        assert_eq!(snapshot.app.selected, remote_idx);
     }
 
     #[test]
