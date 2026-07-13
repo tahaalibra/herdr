@@ -169,6 +169,81 @@ fn request_round_trips_for_server_agent_manifests() {
 }
 
 #[test]
+fn request_round_trips_for_remote_methods() {
+    let add = Request {
+        id: "req_remote_add".into(),
+        method: Method::RemoteAdd(RemoteAddParams {
+            name: Some("x".into()),
+            target: "user@x".into(),
+            keybindings: crate::remote_registry::RemoteKeybindingsSnapshot::Local,
+        }),
+    };
+    let json = serde_json::to_value(&add).unwrap();
+    assert_eq!(json["method"], "remote.add");
+    assert_eq!(json["params"]["keybindings"], "local");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, add);
+
+    let list = Request {
+        id: "req_remote_list".into(),
+        method: Method::RemoteList(EmptyParams::default()),
+    };
+    let json = serde_json::to_value(&list).unwrap();
+    assert_eq!(json["method"], "remote.list");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, list);
+
+    let set_enabled = Request {
+        id: "req_remote_set_enabled".into(),
+        method: Method::RemoteSetEnabled(RemoteSetEnabledParams {
+            remote_id: "remote-1".into(),
+            enabled: false,
+        }),
+    };
+    let json = serde_json::to_value(&set_enabled).unwrap();
+    assert_eq!(json["method"], "remote.set_enabled");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, set_enabled);
+}
+
+#[test]
+fn remote_add_params_default_keybindings_to_local() {
+    let json = r#"{"id":"req_1","method":"remote.add","params":{"target":"user@x"}}"#;
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::RemoteAdd(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+    assert_eq!(params.name, None);
+    assert_eq!(
+        params.keybindings,
+        crate::remote_registry::RemoteKeybindingsSnapshot::Local
+    );
+}
+
+#[test]
+fn remote_response_results_round_trip() {
+    let response = SuccessResponse {
+        id: "req_remote_list".into(),
+        result: ResponseResult::RemoteList {
+            remotes: vec![crate::remote_registry::RemoteDefinitionSnapshot {
+                id: "remote-1".into(),
+                name: "x".into(),
+                target: crate::remote_registry::RemoteTargetSnapshot::Ssh {
+                    target: "user@x".into(),
+                    args: Vec::new(),
+                },
+                session: None,
+                keybindings: crate::remote_registry::RemoteKeybindingsSnapshot::Local,
+                disabled: false,
+            }],
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
 fn request_round_trips_for_agent_explain() {
     let request = Request {
         id: "req_agent_explain".into(),

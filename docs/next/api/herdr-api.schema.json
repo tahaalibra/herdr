@@ -3106,6 +3106,75 @@
           ],
           "type": "string"
         },
+        "RemoteAddParams": {
+          "properties": {
+            "keybindings": {
+              "$ref": "#/schemas/request/$defs/RemoteKeybindingsSnapshot",
+              "default": "local"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
+        "RemoteKeybindingsSnapshot": {
+          "enum": [
+            "local",
+            "server"
+          ],
+          "type": "string"
+        },
+        "RemoteRemoveParams": {
+          "properties": {
+            "remote_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "remote_id"
+          ],
+          "type": "object"
+        },
+        "RemoteRenameParams": {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "remote_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "remote_id",
+            "name"
+          ],
+          "type": "object"
+        },
+        "RemoteSetEnabledParams": {
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "remote_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "remote_id",
+            "enabled"
+          ],
+          "type": "object"
+        },
         "ServerLiveHandoffParams": {
           "properties": {
             "expected_protocol": {
@@ -4006,6 +4075,86 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "remote.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "remote.add",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/RemoteAddParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "remote.remove",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/RemoteRemoveParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "remote.rename",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/RemoteRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "remote.set_enabled",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/RemoteSetEnabledParams"
             }
           },
           "required": [
@@ -7763,6 +7912,91 @@
           ],
           "type": "string"
         },
+        "RemoteDefinitionSnapshot": {
+          "properties": {
+            "disabled": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "keybindings": {
+              "$ref": "#/schemas/success_response/$defs/RemoteKeybindingsSnapshot",
+              "default": "local"
+            },
+            "name": {
+              "type": "string"
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target": {
+              "$ref": "#/schemas/success_response/$defs/RemoteTargetSnapshot"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "target"
+          ],
+          "type": "object"
+        },
+        "RemoteKeybindingsSnapshot": {
+          "enum": [
+            "local",
+            "server"
+          ],
+          "type": "string"
+        },
+        "RemoteTargetSnapshot": {
+          "oneOf": [
+            {
+              "properties": {
+                "args": {
+                  "description": "ssh options that precede the destination (e.g. `-L`, `-J`, `-p`, `-o`). Empty for a\nbare-host target. `#[serde(default)]` makes legacy snapshots (only `target`)\ndeserialize to an empty vec; `skip_serializing_if` keeps bare targets serializing\nbyte-identical to today (no `args` key on disk).",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "target": {
+                  "description": "The ssh destination (`user@host`, host alias, `ssh://…`). Used as the dedup/identity\nkey, the socket-path key, and the display name. For a full ssh spec this is the last\npositional token (the destination); for a bare token it is the token itself.",
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ssh",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "target"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "local",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "ResponseResult": {
           "oneOf": [
             {
@@ -7870,6 +8104,89 @@
               "required": [
                 "type",
                 "workspaces"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "remotes": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/RemoteDefinitionSnapshot"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "remote_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "remotes"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "remote": {
+                  "$ref": "#/schemas/success_response/$defs/RemoteDefinitionSnapshot"
+                },
+                "type": {
+                  "const": "remote_added",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "remote"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "remote_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "remote_removed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "remote_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "remote": {
+                  "$ref": "#/schemas/success_response/$defs/RemoteDefinitionSnapshot"
+                },
+                "type": {
+                  "const": "remote_renamed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "remote"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "remote": {
+                  "$ref": "#/schemas/success_response/$defs/RemoteDefinitionSnapshot"
+                },
+                "type": {
+                  "const": "remote_enabled_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "remote"
               ],
               "type": "object"
             },

@@ -85,6 +85,7 @@ mod pty;
 mod raw_input;
 mod release_notes;
 mod remote;
+mod remote_registry;
 mod render_prof;
 mod selection;
 mod server;
