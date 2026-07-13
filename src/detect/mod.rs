@@ -154,7 +154,52 @@ fn lookup_agent(name: &str) -> Option<Agent> {
 /// Identify which agent is running from the process name.
 /// Returns `None` for plain shells or unrecognized programs.
 pub fn identify_agent(process_name: &str) -> Option<Agent> {
-    parse_agent_label(process_name)
+    let name = normalized_agent_lookup_name(process_name);
+    parse_agent_label(&name).or_else(|| versioned_download_agent(&name))
+}
+
+/// Recognize agents whose self-managed installs run a versioned download
+/// binary instead of the launcher name.
+///
+/// Grok Build installs `~/.grok/bin/grok` as a symlink to
+/// `~/.grok/downloads/grok-<version>-<os>-<arch>` (initial installs use
+/// `grok-<os>-<arch>`), so the foreground process is named after the
+/// download, e.g. `grok-0.2.99-linux-x86_64`, and the kernel-truncated comm
+/// looks like `grok-0.2.99-lin`. Matching stays narrow: the basename must be
+/// `grok-` followed by a version segment or a known `<os>-<arch>` pair.
+fn versioned_download_agent(normalized_name: &str) -> Option<Agent> {
+    let rest = normalized_name.strip_prefix("grok-")?;
+    let mut segments = rest.split('-');
+    let first = segments.next()?;
+
+    // `grok-<version>` optionally followed by platform segments, including
+    // comm values truncated mid-segment by the kernel (`grok-0.2.99-lin`).
+    if version_segment(first) {
+        return Some(Agent::Grok);
+    }
+
+    // Unversioned initial download: `grok-<os>-<arch>` plus optional extras
+    // such as a libc suffix.
+    if os_segment(first) && segments.next().is_some_and(arch_segment) {
+        return Some(Agent::Grok);
+    }
+
+    None
+}
+
+fn version_segment(segment: &str) -> bool {
+    segment.contains('.')
+        && segment.starts_with(|ch: char| ch.is_ascii_digit())
+        && segment.ends_with(|ch: char| ch.is_ascii_digit())
+        && segment.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+}
+
+fn os_segment(segment: &str) -> bool {
+    matches!(segment, "linux" | "macos" | "darwin" | "windows")
+}
+
+fn arch_segment(segment: &str) -> bool {
+    matches!(segment, "x86_64" | "x64" | "amd64" | "aarch64" | "arm64")
 }
 
 pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
@@ -303,8 +348,27 @@ fn wrapped_agent_name_from_runtime_argv(runtime: &str, argv: Option<&[String]>) 
         "cmd" => windows_cmd_arg_agent_name(argv),
         "powershell" | "pwsh" => powershell_arg_agent_name(argv),
         "tmux" => None,
+        "bwrap" => bwrap_arg_agent_name(argv),
         _ => None,
     }
+}
+
+/// Resolve the wrapped command from a bubblewrap sandbox invocation.
+///
+/// Grok Build re-executes itself under `bwrap ... -- <binary>` on Linux, so
+/// the foreground process group leader is `bwrap` rather than the agent.
+/// Only the explicit `--` form is parsed; bwrap options take values, so
+/// positional scanning without the separator is not reliable.
+fn bwrap_arg_agent_name(argv: &[String]) -> Option<String> {
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            return args
+                .next()
+                .and_then(|token| agent_name_from_path_token(token));
+        }
+    }
+    None
 }
 
 fn windows_cmd_arg_agent_name(argv: &[String]) -> Option<String> {
@@ -504,7 +568,8 @@ fn resolved_agent_name_from_path_token(token: &str) -> Option<String> {
 }
 
 fn agent_name_from_basename(basename: &str) -> Option<String> {
-    let agent = parse_agent_label(basename)?;
+    let agent = parse_agent_label(basename)
+        .or_else(|| versioned_download_agent(&normalized_agent_lookup_name(basename)))?;
     Some(agent_label(agent).to_string())
 }
 
@@ -551,6 +616,7 @@ fn is_generic_runtime_or_shell(name: &str) -> bool {
             | "cmd"
             | "powershell"
             | "pwsh"
+            | "bwrap"
     )
 }
 
@@ -719,6 +785,46 @@ mod tests {
     }
 
     #[test]
+    fn identify_grok_versioned_download_binaries() {
+        // Self-updated download names under ~/.grok/downloads/.
+        assert_eq!(
+            identify_agent("grok-0.2.99-linux-x86_64"),
+            Some(Agent::Grok)
+        );
+        assert_eq!(
+            identify_agent("grok-1.10.0-macos-aarch64"),
+            Some(Agent::Grok)
+        );
+        assert_eq!(
+            identify_agent("grok-0.3.1-windows-x86_64.exe"),
+            Some(Agent::Grok)
+        );
+        // Kernel-truncated comm of the versioned binary.
+        assert_eq!(identify_agent("grok-0.2.99-lin"), Some(Agent::Grok));
+        // Initial install download without a version segment.
+        assert_eq!(identify_agent("grok-linux-x86_64"), Some(Agent::Grok));
+        assert_eq!(identify_agent("grok-macos-arm64"), Some(Agent::Grok));
+    }
+
+    #[test]
+    fn identify_grok_versioned_names_stays_narrow() {
+        assert_eq!(identify_agent("grok-helper"), None);
+        assert_eq!(identify_agent("grok-2"), None);
+        assert_eq!(identify_agent("grok-linux"), None);
+        assert_eq!(identify_agent("grok-linux-mips"), None);
+        assert_eq!(identify_agent("grok-.2-linux-x86_64"), None);
+        assert_eq!(identify_agent("grokify-0.2.99-linux-x86_64"), None);
+        assert_eq!(identify_agent("notgrok-0.2.99-linux-x86_64"), None);
+    }
+
+    #[test]
+    fn parse_agent_label_rejects_versioned_download_names() {
+        // Hook-reported labels must stay exact; only process identification
+        // accepts versioned download basenames.
+        assert_eq!(parse_agent_label("grok-0.2.99-linux-x86_64"), None);
+    }
+
+    #[test]
     fn identify_case_insensitive() {
         assert_eq!(identify_agent("Pi"), Some(Agent::Pi));
         assert_eq!(identify_agent("CLAUDE"), Some(Agent::Claude));
@@ -740,6 +846,81 @@ mod tests {
             identify_agent_in_job(&job),
             Some((Agent::Codex, "codex".to_string()))
         );
+    }
+
+    #[test]
+    fn identify_agent_in_job_resolves_grok_bwrap_sandbox() {
+        // Real shape from a Linux Grok Build session: the launcher re-executes
+        // itself under bwrap, so the process group leader is bwrap and the
+        // agent process runs the versioned download binary with a truncated
+        // comm.
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 3143,
+            processes: vec![
+                foreground_process(
+                    3143,
+                    "bwrap",
+                    &[
+                        "bwrap",
+                        "--bind",
+                        "/",
+                        "/",
+                        "--ro-bind",
+                        "/data",
+                        "/data",
+                        "--dev-bind",
+                        "/dev",
+                        "/dev",
+                        "--proc",
+                        "/proc",
+                        "--",
+                        "/home/user/.grok/downloads/grok-0.2.99-linux-x86_64",
+                    ],
+                ),
+                foreground_process(
+                    3153,
+                    "grok-0.2.99-lin",
+                    &["/home/user/.grok/downloads/grok-0.2.99-linux-x86_64"],
+                ),
+            ],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Grok, "grok".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_resolves_grok_versioned_binary_without_sandbox() {
+        // Sandbox-less launches still run the versioned download binary.
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 77,
+            processes: vec![foreground_process(
+                77,
+                "grok-0.2.99-lin",
+                &["/home/user/.grok/downloads/grok-0.2.99-linux-x86_64"],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Grok, "grok-0.2.99-lin".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_ignores_bwrap_without_agent_command() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 9,
+            processes: vec![foreground_process(
+                9,
+                "bwrap",
+                &["bwrap", "--bind", "/", "/", "--", "/usr/bin/vim"],
+            )],
+        };
+
+        assert_eq!(identify_agent_in_job(&job), None);
     }
 
     #[test]
@@ -1058,6 +1239,14 @@ mod tests {
     #[test]
     fn cmdline_argv0_agent_name_requires_exact_agent_basename() {
         assert_eq!(cmdline_argv0_agent_name("/tmp/my-codex-helper"), None);
+    }
+
+    #[test]
+    fn cmdline_argv0_agent_name_canonicalizes_grok_versioned_download() {
+        assert_eq!(
+            cmdline_argv0_agent_name("/home/user/.grok/downloads/grok-0.2.99-linux-x86_64"),
+            Some("grok".to_string())
+        );
     }
 
     #[cfg(unix)]

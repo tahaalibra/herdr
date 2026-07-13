@@ -1,24 +1,27 @@
 id = "grok"
-version = "2026.07.03.1"
+version = "2026.07.13.1"
 min_engine_version = 2
-updated_at = "2026-07-03T00:00:00Z"
+updated_at = "2026-07-13T00:00:00Z"
 aliases = ["grok-build"]
 
-# Evidence: Grok Build 0.2.82 live pane reads.
+# Evidence: Grok Build 0.2.82 and 0.2.99 live pane reads.
 #
 # Working turns render one live status line directly above the prompt box:
 #   "⠧ Waiting on subagent… 2.8s   13s ⇣29.7k [stop]"
 #   "⠴ Explore /tmp/… + 1 more… 5.6s   19s ⇣29.7k [stop]"
 # with a braille spinner and a trailing [stop] chip, plus an Esc:cancel
-# footer hint. Permission prompts and ask-user-question dialogs replace the
-# spinner with "◆" and draw a "┃"-guttered option list:
+# (0.2.82) or Ctrl+c:cancel (0.2.99) footer hint. Permission prompts and
+# ask-user-question dialogs replace the spinner with "◆" and draw a
+# "┃"-guttered option list:
 #   "┃  2 (○) Yes, proceed"
 #   "┃  z (○) Type your answer here"
 # with footer hints "1/3:select │ Ctrl+o:yolo │ Ctrl+c:cancel" (permission)
 # or "Esc:unselect │ Tab:scrollback │ Shift+x:dismiss" (question dialog).
-# Idle footers end with "Ctrl+.:shortcuts" and never contain "Esc:cancel".
-# The startup splash draws its logo with braille characters, so working
-# rules must anchor on the [stop] chip, not on a bare spinner glyph.
+# Idle footers end with a ":shortcuts" hint whose key varies by version and
+# terminal ("Ctrl+.:shortcuts" on 0.2.82, "Ctrl+x:shortcuts" on 0.2.99) and
+# never contain a cancel hint. The startup splash draws its logo with
+# braille characters, so working rules must anchor on the [stop] chip, not
+# on a bare spinner glyph.
 
 [[rules]]
 id = "option_dialog_blocked"
@@ -91,7 +94,7 @@ state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(2)"
 visible_idle = true
-contains = ["ctrl+.:shortcuts"]
+contains = [":shortcuts"]
 not = [
   { contains = ["esc:cancel"] },
   { contains = ["ctrl+c:cancel"] },
