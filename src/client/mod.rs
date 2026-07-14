@@ -5288,8 +5288,9 @@ async fn run_client_loop(
                             // `set_connection_state(.., Connected)` nor anything here sets
                             // `active_server_id`, so key off the handler's explicit `server_id`
                             // (NOT `active_server_id()`). Its summary is put in flight FIRST; the
-                            // dedupe guard then prevents the whole-fleet fan-out below from
-                            // double-spawning it.
+                            // fleet fan-out below then sees it pending and QUEUES one rerun for
+                            // it (bounded: one in-flight + one queued), so a connect performs a
+                            // prioritized fetch plus one authoritative follow-up.
                             start_single_secondary_summary_refresh(
                                 model,
                                 &server_id,

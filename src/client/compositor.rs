@@ -406,6 +406,12 @@ impl ClientCompositor {
     /// SHARED renderer onto its narrow collapsed layout. Client-local; no server traffic.
     pub(crate) fn toggle_sidebar_collapsed(&mut self) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
+        // The collapsed rail has no width divider: drop any in-progress divider
+        // drag so a press → keyboard-collapse → release sequence cannot leave a
+        // stuck drag that resizes the sidebar on the next left-drag after
+        // re-expanding.
+        self.resizing_sidebar = false;
+        self.last_divider_down = None;
     }
 
     /// #22: toggle a worktree group's collapsed state in the client-local set (no server round-trip,
@@ -1508,7 +1514,6 @@ impl ClientSidebarSnapshot {
         app.agent_panel_sort = compositor.agent_panel_sort;
         app.sidebar_spaces = settings.sidebar_spaces.clone();
         app.sidebar_agents = settings.sidebar_agents.clone();
-        // item 2 (C3): host-banner styling rides UiSettingsInfo over the wire.
         app.global_menu_extra_labels = vec!["add remote", "manage remotes"];
         // #25: gate the SHARED renderer onto its collapsed layout BEFORE geometry is computed, so
         // the collapsed sections + toggle rect are what gets laid out and what `hit_test` reads
@@ -3296,6 +3301,45 @@ mod tests {
                 .sidebar_default_width
                 .clamp(settings.sidebar_min_width, settings.sidebar_max_width)
         );
+    }
+
+    // A divider press followed by a keyboard collapse mid-press must not leave a stuck
+    // drag: after re-expanding, a left-drag anywhere may not resize the sidebar.
+    #[test]
+    fn collapse_toggle_cancels_in_progress_divider_drag() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        let model = single_server_two_ws_model();
+        let mut compositor = ClientCompositor::new(26);
+        let settings = model.ui_settings().clone();
+
+        // Arm a divider drag with a press on the divider column.
+        let press = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 25,
+            row: 5,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(
+            compositor.handle_sidebar_resize_mouse(&press, 80, 24, &settings),
+            Some(SidebarResizeOutcome::Redraw)
+        );
+
+        // Keyboard collapse + expand while the (never-released) press is live.
+        compositor.toggle_sidebar_collapsed();
+        compositor.toggle_sidebar_collapsed();
+
+        // The drag was cancelled by the toggle: a drag no longer resizes.
+        let drag = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 18,
+            row: 5,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(
+            compositor.handle_sidebar_resize_mouse(&drag, 80, 24, &settings),
+            None
+        );
+        assert_eq!(compositor.sidebar_width(), 26, "width unchanged");
     }
 
     // #19: pressing a workspace card and dragging past the threshold to another card's row, then
