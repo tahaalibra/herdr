@@ -1068,7 +1068,9 @@ fn dispatch_composited_mouse_input(
                 ClientInputDispatch::Consumed
             };
         }
-        let sidebar_width = compositor.sidebar_width().min(host_size.0);
+        // The EFFECTIVE width (collapsed rail while collapsed) — the raw configured
+        // width would swallow content-area motion over the reclaimed columns.
+        let sidebar_width = compositor.effective_sidebar_width(host_size.0);
         if mouse.column < sidebar_width || compositor.hover().is_some() {
             let next =
                 compositor.hover_test(model, mouse.column, mouse.row, host_size.0, host_size.1);
@@ -1256,7 +1258,10 @@ fn dispatch_composited_mouse_input(
         return dispatch_sidebar_hit_target(target, model, mouse);
     }
 
-    let sidebar_width = compositor.sidebar_width().min(host_size.0);
+    // The EFFECTIVE width (collapsed rail while collapsed): a click over the
+    // reclaimed content columns must reach the server at the collapsed offset,
+    // not be swallowed / offset by the expanded width.
+    let sidebar_width = compositor.effective_sidebar_width(host_size.0);
     if mouse.column < sidebar_width {
         return ClientInputDispatch::Consumed;
     }
@@ -3656,6 +3661,7 @@ fn refresh_client_supervisor_summaries(
         model,
         ssh_bridges,
         pending_summary_refresh_server_ids,
+        queued_summary_refresh_server_ids,
         event_tx,
     );
     model.apply_secondary_summary_results(immediate_results);
@@ -3666,6 +3672,7 @@ fn start_secondary_supervisor_summary_refreshes(
     model: &supervisor::ClientSupervisorModel,
     ssh_bridges: &HashMap<supervisor::ServerId, crate::remote::RemoteBridge>,
     pending_summary_refresh_server_ids: &mut HashSet<supervisor::ServerId>,
+    queued_summary_refresh_server_ids: &mut HashSet<supervisor::ServerId>,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) -> Vec<(
     supervisor::ServerId,
@@ -3674,6 +3681,10 @@ fn start_secondary_supervisor_summary_refreshes(
     let mut immediate_results = Vec::new();
     for plan in model.secondary_connection_plans() {
         if pending_summary_refresh_server_ids.contains(&plan.server_id) {
+            // An in-flight fetch may have read pre-change state: queue a rerun
+            // (consumed by the completion handler) instead of dropping the
+            // signal, matching the single-server helper's coalescing.
+            queued_summary_refresh_server_ids.insert(plan.server_id.clone());
             continue;
         }
         let Some(target) =
@@ -3993,6 +4004,7 @@ fn handle_server_write_failure(
     state.frame_cache.remove(&server_id);
     state.summary_subscription_server_ids.remove(&server_id);
     state.pending_summary_refresh_server_ids.remove(&server_id);
+    state.queued_summary_refresh_server_ids.remove(&server_id);
     state
         .pending_secondary_connect_server_ids
         .remove(&server_id);
@@ -8729,6 +8741,49 @@ mod tests {
             );
         }
 
+        // Regression (5f5c8c7 follow-up): the mouse fall-through must use the EFFECTIVE
+        // (collapsed rail) width, not the raw configured width — otherwise clicks over the
+        // reclaimed content columns are swallowed and clicks past the old width forward with
+        // a stale offset.
+        #[test]
+        fn composited_input_translates_content_mouse_while_collapsed() {
+            let (mut model, _) = mixed_remote_model();
+            let mut compositor = compositor::ClientCompositor::new(26);
+            compositor.toggle_sidebar_collapsed();
+            let host = (60u16, 16u16);
+            assert_eq!(
+                compositor.effective_sidebar_width(host.0),
+                crate::ui::COLLAPSED_WIDTH
+            );
+
+            // Host col 10 (1-based 11) sits over the RECLAIMED content area
+            // (rail is 4 cols): it must forward at the collapsed offset
+            // (10 - 4 = content col 6, 1-based 7), not be consumed.
+            let dispatch = dispatch_composited_input(
+                b"\x1b[<0;11;4M".to_vec(),
+                &mut compositor,
+                &mut model,
+                host,
+            );
+            assert_eq!(
+                dispatch,
+                ClientInputDispatch::Forward(b"\x1b[<0;7;4M".to_vec())
+            );
+
+            // Host col 30 (1-based 31): content col 26 (1-based 27) — NOT the
+            // stale expanded offset (30 - 26 = col 5).
+            let dispatch = dispatch_composited_input(
+                b"\x1b[<0;31;4M".to_vec(),
+                &mut compositor,
+                &mut model,
+                host,
+            );
+            assert_eq!(
+                dispatch,
+                ClientInputDispatch::Forward(b"\x1b[<0;27;4M".to_vec())
+            );
+        }
+
         // item 7 (Area 4): an SGR no-button motion report (`\x1b[<35;col;rowM`, drag-bit set,
         // button code 3) parses to `MouseEventKind::Moved`. 1-based escape over 0-based (col,row).
         fn moved_bytes(col: u16, row: u16) -> Vec<u8> {
@@ -9371,12 +9426,14 @@ mod tests {
             let ssh_bridges = HashMap::from([(remote_id.clone(), bridge)]);
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
             let mut pending = HashSet::new();
+            let mut queued = HashSet::new();
 
             let started_at = Instant::now();
             start_secondary_supervisor_summary_refreshes(
                 &model,
                 &ssh_bridges,
                 &mut pending,
+                &mut queued,
                 &event_tx,
             );
             let elapsed = started_at.elapsed();

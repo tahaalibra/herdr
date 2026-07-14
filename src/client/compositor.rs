@@ -331,6 +331,9 @@ impl ClientCompositor {
         }
     }
 
+    /// Test accessor for the CONFIGURED (expanded) width. Production geometry
+    /// must go through `effective_sidebar_width`, which accounts for collapse.
+    #[cfg(test)]
     pub(crate) fn sidebar_width(&self) -> u16 {
         self.sidebar_width
     }
@@ -1135,7 +1138,12 @@ impl ClientCompositor {
         )
     }
 
-    fn effective_sidebar_width(&self, host_width: u16) -> u16 {
+    /// The sidebar width actually laid out for `host_width` — the configured
+    /// width while expanded, the compact rail (or 0 in hidden mode) while
+    /// collapsed. Every geometry consumer (compose, hit-test, hover, and the
+    /// mouse fall-through in `client::mod`) must use THIS, never the raw
+    /// configured `sidebar_width`, or collapsed-mode coordinates go stale.
+    pub(crate) fn effective_sidebar_width(&self, host_width: u16) -> u16 {
         if host_width <= 1 {
             return 0;
         }
