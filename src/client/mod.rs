@@ -89,14 +89,6 @@ const ADD_REMOTE_TARGET_VALIDATE_RETRY_DELAY: Duration = Duration::from_millis(5
 // cover a real binary install over ssh; the ssh `ConnectTimeout` bounds the unreachable case.
 #[cfg(unix)]
 const ADD_REMOTE_BRIDGE_TIMEOUT: Duration = Duration::from_secs(90);
-/// How often the downstream-throughput sampler converts cumulative byte counters into a
-/// bytes/sec rate for the host banner (issue #13). ~1s gives a steady, readable number.
-#[cfg(unix)]
-const RX_RATE_SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
-/// Cadence for stream latency probes (issue #13). A Ping over the persistent stream measures true
-/// round-trip time without the per-request bridge-connection / remote-process-spawn cost.
-#[cfg(unix)]
-const SERVER_PING_INTERVAL: Duration = Duration::from_millis(1000);
 
 // ---------------------------------------------------------------------------
 // Client state
@@ -179,24 +171,6 @@ struct ClientState {
     /// switch cache (single-server mode keys everything on `ServerId::main()`).
     #[cfg(unix)]
     frame_cache: HashMap<supervisor::ServerId, protocol::FrameData>,
-    /// issue #13: per-server cumulative downstream bytes (fed by reader threads).
-    #[cfg(unix)]
-    rx_counters: RxByteCounters,
-    /// issue #13: last sampled (bytes, instant) per server, for deriving the banner bytes/sec rate.
-    #[cfg(unix)]
-    server_rx_sample: HashMap<supervisor::ServerId, (u64, Instant)>,
-    /// issue #13: last time the downstream-rate sampler ran.
-    #[cfg(unix)]
-    last_rx_sample_at: Instant,
-    /// issue #13: monotonic nonce for stream latency probes.
-    #[cfg(unix)]
-    ping_nonce: u64,
-    /// issue #13: outstanding ping per server (nonce + send time) awaiting a Pong.
-    #[cfg(unix)]
-    pending_pings: HashMap<supervisor::ServerId, (u64, Instant)>,
-    /// issue #13: last time stream latency probes were sent.
-    #[cfg(unix)]
-    last_ping_at: Instant,
     /// Servers with active summary-event subscription workers.
     #[cfg(unix)]
     summary_subscription_server_ids: HashSet<supervisor::ServerId>,
@@ -3005,13 +2979,12 @@ fn connect_secondary_client_stream(
     Ok(stream)
 }
 
-/// Wire a freshly handshaken secondary stream into the loop: a tagged reader thread (with the
-/// per-server byte counter) plus a writer thread registered in `server_writes`.
+/// Wire a freshly handshaken secondary stream into the loop: a tagged reader thread plus a
+/// writer thread registered in `server_writes`.
 #[cfg(unix)]
 fn attach_secondary_client_stream(
     server_id: supervisor::ServerId,
     stream: LocalStream,
-    rx_bytes: Arc<std::sync::atomic::AtomicU64>,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     server_writes: &mut HashMap<supervisor::ServerId, ServerWriteHandle>,
@@ -3024,7 +2997,6 @@ fn attach_secondary_client_stream(
         server_reader_thread(
             reader_server_id,
             read_stream,
-            rx_bytes,
             read_tx,
             &read_quit,
             MAX_FRAME_SIZE,
@@ -4214,35 +4186,6 @@ fn blit_client_frame_with_stats(state: &mut ClientState, frame_data: protocol::F
     record_client_frame_sample(state, render_started_at.elapsed());
 }
 
-/// Derive each server's recent downstream bytes/sec from the cumulative reader counters and push
-/// it into the supervisor model for the host banner. Rate-limited to [`RX_RATE_SAMPLE_INTERVAL`].
-#[cfg(unix)]
-fn sample_download_rates(state: &mut ClientState, now: Instant) {
-    if now.duration_since(state.last_rx_sample_at) < RX_RATE_SAMPLE_INTERVAL {
-        return;
-    }
-    state.last_rx_sample_at = now;
-
-    let snapshot = state.rx_counters.snapshot();
-    let mut rates: Vec<(supervisor::ServerId, u64)> = Vec::new();
-    for (server_id, bytes) in snapshot {
-        if let Some((prev_bytes, prev_at)) = state.server_rx_sample.get(&server_id) {
-            let dt = now.duration_since(*prev_at).as_secs_f64();
-            if dt > 0.0 {
-                let delta = bytes.saturating_sub(*prev_bytes);
-                rates.push((server_id.clone(), (delta as f64 / dt) as u64));
-            }
-        }
-        state.server_rx_sample.insert(server_id, (bytes, now));
-    }
-
-    if let Some(model) = state.supervisor_model.as_mut() {
-        for (server_id, rate) in rates {
-            model.set_server_download_bps(&server_id, rate);
-        }
-    }
-}
-
 #[cfg(unix)]
 fn record_client_frame_sample(state: &mut ClientState, render_duration: Duration) {
     let sample = state.frame_stats.record_render_duration(render_duration);
@@ -4305,18 +4248,6 @@ async fn run_client_loop(
         last_supervisor_summary_refresh: Instant::now(),
         #[cfg(unix)]
         frame_cache: HashMap::new(),
-        #[cfg(unix)]
-        rx_counters: RxByteCounters::default(),
-        #[cfg(unix)]
-        server_rx_sample: HashMap::new(),
-        #[cfg(unix)]
-        last_rx_sample_at: Instant::now(),
-        #[cfg(unix)]
-        ping_nonce: 0,
-        #[cfg(unix)]
-        pending_pings: HashMap::new(),
-        #[cfg(unix)]
-        last_ping_at: Instant::now(),
         #[cfg(unix)]
         summary_subscription_server_ids: HashSet::new(),
         #[cfg(unix)]
@@ -4384,8 +4315,6 @@ async fn run_client_loop(
     let server_read_quit = should_quit.clone();
     let server_read_tx = event_tx.clone();
     let read_stream = stream.try_clone().map_err(ClientError::ConnectionFailed)?;
-    #[cfg(unix)]
-    let main_rx_bytes = state.rx_counters.counter(&supervisor::ServerId::main());
     std::thread::spawn(move || {
         let max_frame_size = if kitty_graphics_enabled {
             MAX_GRAPHICS_FRAME_SIZE
@@ -4396,7 +4325,6 @@ async fn run_client_loop(
         server_reader_thread(
             supervisor::ServerId::main(),
             read_stream,
-            main_rx_bytes,
             server_read_tx,
             &server_read_quit,
             max_frame_size,
@@ -4829,20 +4757,9 @@ async fn run_client_loop(
                         }
                     }
                 }
-                ServerMessage::Pong { nonce } => {
-                    // issue #13: true round-trip latency over the persistent stream (no per-ping
-                    // connection/process-spawn overhead). Only the matching outstanding nonce
-                    // counts; single-server clients never probe, so this stays inert there.
-                    if let Some((pending_nonce, sent_at)) = state.pending_pings.remove(&server_id) {
-                        if pending_nonce == nonce {
-                            if let Some(model) = &mut state.supervisor_model {
-                                let rtt =
-                                    sent_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
-                                model.record_server_ping(&server_id, rtt);
-                                state.request_full_redraw();
-                            }
-                        }
-                    }
+                ServerMessage::Pong { .. } => {
+                    // Latency probes were removed with the host-banner metrics
+                    // readout; a Pong from an older server is ignored.
                 }
                 ServerMessage::Compressed(_) => {
                     // The reader thread inflates compressed payloads; reaching this
@@ -5318,11 +5235,9 @@ async fn run_client_loop(
                         if let Some(bridge) = connection.bridge {
                             state.ssh_bridges.insert(server_id.clone(), bridge);
                         }
-                        let rx_bytes = state.rx_counters.counter(&server_id);
                         if let Err(err) = attach_secondary_client_stream(
                             server_id.clone(),
                             connection.stream,
-                            rx_bytes,
                             &event_tx,
                             &should_quit,
                             &mut server_writes,
@@ -5431,19 +5346,14 @@ async fn run_client_loop(
                 }
                 match result {
                     Ok(success) => {
-                        // Clone the (Arc-backed) counters registry up front so we can resolve the
-                        // new server's byte counter without re-borrowing `state` inside the model borrow.
-                        let rx_counters = state.rx_counters.clone();
                         if let Some(model) = &mut state.supervisor_model {
                             let server_id = model.add_secondary(success.remote);
                             if let Some(bridge) = success.bridge {
                                 state.ssh_bridges.insert(server_id.clone(), bridge);
                             }
-                            let rx_bytes = rx_counters.counter(&server_id);
                             match attach_secondary_client_stream(
                                 server_id.clone(),
                                 success.stream,
-                                rx_bytes,
                                 &event_tx,
                                 &should_quit,
                                 &mut server_writes,
@@ -5575,24 +5485,12 @@ async fn run_client_loop(
                 )));
             }
             ClientLoopEvent::Timer => {
-                // Multi-server housekeeping: latency probes, throughput sampling, reconnect
-                // backoff, the adaptive summary cadence, and the gated animation step. All of it
-                // is inert in single-server mode (no compositor), preserving today's idle loop.
+                // Multi-server housekeeping: reconnect backoff, the adaptive summary
+                // cadence, and the gated animation step. All of it is inert in
+                // single-server mode (no compositor), preserving today's idle loop.
                 #[cfg(unix)]
                 if state.compositor.is_some() {
                     let now = Instant::now();
-                    sample_download_rates(&mut state, now);
-                    // issue #13: probe each connected server's latency over its persistent stream.
-                    if now.duration_since(state.last_ping_at) >= SERVER_PING_INTERVAL {
-                        state.last_ping_at = now;
-                        for (server_id, handle) in &server_writes {
-                            state.ping_nonce = state.ping_nonce.wrapping_add(1);
-                            let nonce = state.ping_nonce;
-                            if queue_to_server(handle, ClientMessage::Ping { nonce }).is_ok() {
-                                state.pending_pings.insert(server_id.clone(), (nonce, now));
-                            }
-                        }
-                    }
                     retry_due_secondary_connections(&mut state, now, &event_tx, &mut server_writes);
 
                     // item 6 (Area 6): adaptive secondary cadence (400ms active / 2s background).
@@ -5684,69 +5582,15 @@ async fn run_client_loop(
 }
 
 // ---------------------------------------------------------------------------
-// Per-server downstream byte counters (issue #13 host-banner throughput)
-// ---------------------------------------------------------------------------
-
-/// Shared cumulative downstream byte counters keyed by server, fed by the reader threads and
-/// sampled on the UI loop to derive a bytes/sec rate for the host banner.
-#[cfg(unix)]
-#[derive(Clone, Default)]
-struct RxByteCounters(
-    Arc<std::sync::Mutex<HashMap<supervisor::ServerId, Arc<std::sync::atomic::AtomicU64>>>>,
-);
-
-#[cfg(unix)]
-impl RxByteCounters {
-    /// The (get-or-create) cumulative byte counter for one server.
-    fn counter(&self, server_id: &supervisor::ServerId) -> Arc<std::sync::atomic::AtomicU64> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(server_id.clone())
-            .or_default()
-            .clone()
-    }
-
-    /// Snapshot of cumulative bytes received per server.
-    fn snapshot(&self) -> Vec<(supervisor::ServerId, u64)> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|(id, bytes)| (id.clone(), bytes.load(std::sync::atomic::Ordering::Relaxed)))
-            .collect()
-    }
-}
-
-/// A `Read` wrapper that tallies bytes into a shared counter, so the reader thread can report
-/// downstream throughput without changing the framing/protocol layer.
-#[cfg(unix)]
-struct CountingReader<R> {
-    inner: R,
-    counter: Arc<std::sync::atomic::AtomicU64>,
-}
-
-#[cfg(unix)]
-impl<R: std::io::Read> std::io::Read for CountingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.counter
-            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-        Ok(n)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Server reader thread
 // ---------------------------------------------------------------------------
 
 /// Blocking thread that reads ServerMessages from one server and sends them to the main event
-/// loop tagged with the owning server id, tallying downstream bytes for the host banner.
+/// loop tagged with the owning server id.
 #[cfg(unix)]
 fn server_reader_thread(
     server_id: supervisor::ServerId,
-    stream: LocalStream,
-    rx_bytes: Arc<std::sync::atomic::AtomicU64>,
+    mut stream: LocalStream,
     event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     max_frame_size: usize,
@@ -5759,11 +5603,6 @@ fn server_reader_thread(
         let _ = event_tx.blocking_send(ClientLoopEvent::ServerDisconnected(server_id));
         return;
     }
-    // Tally every downstream byte (issue #13) without touching the framing layer.
-    let mut stream = CountingReader {
-        inner: stream,
-        counter: rx_bytes,
-    };
 
     loop {
         if should_quit.load(Ordering::Acquire) {
@@ -7336,12 +7175,6 @@ mod tests {
                 supervisor_model: Some(model),
                 last_supervisor_summary_refresh: Instant::now(),
                 frame_cache: HashMap::new(),
-                rx_counters: RxByteCounters::default(),
-                server_rx_sample: HashMap::new(),
-                last_rx_sample_at: Instant::now(),
-                ping_nonce: 0,
-                pending_pings: HashMap::new(),
-                last_ping_at: Instant::now(),
                 summary_subscription_server_ids: HashSet::new(),
                 pending_summary_refresh_server_ids: HashSet::new(),
                 queued_summary_refresh_server_ids: HashSet::new(),
@@ -10229,13 +10062,9 @@ mod tests {
 
         #[test]
         fn no_tick_advance_when_idle() {
-            // With no working agent — and the host banner animation forced Static so the banner
-            // does not gate animation (item 2/C3) — the gate is false, so the animation step
-            // never runs regardless of elapsed time → the tick stays put.
-            let (mut idle_model, _) = animation_model("idle");
-            let mut ui_settings = idle_model.ui_settings().clone();
-            ui_settings.sidebar_host.animation = crate::config::HostBannerAnimation::Static;
-            idle_model.set_ui_settings(ui_settings);
+            // With no working agent the gate is false (host banners no longer animate),
+            // so the animation step never runs regardless of elapsed time → the tick stays put.
+            let (idle_model, _) = animation_model("idle");
             assert!(!compositor::sidebar_wants_animation(&idle_model));
             let wants = compositor::sidebar_wants_animation(&idle_model);
             let t0 = Instant::now();

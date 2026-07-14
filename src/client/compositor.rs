@@ -1501,7 +1501,6 @@ impl ClientSidebarSnapshot {
         app.sidebar_spaces = settings.sidebar_spaces.clone();
         app.sidebar_agents = settings.sidebar_agents.clone();
         // item 2 (C3): host-banner styling rides UiSettingsInfo over the wire.
-        app.sidebar_host = settings.sidebar_host.clone();
         app.global_menu_extra_labels = vec!["add remote", "manage remotes"];
         // #25: gate the SHARED renderer onto its collapsed layout BEFORE geometry is computed, so
         // the collapsed sections + toggle rect are what gets laid out and what `hit_test` reads
@@ -2034,9 +2033,7 @@ fn agent_state_from_status(status: &str) -> (AgentState, bool) {
 }
 
 /// Whether anything on the client sidebar is currently animating, gating the animation
-/// cadence (no idle CPU spin). Read-only over the cached model; performs NO I/O. The ONLY
-/// banner-active input is `host_banner_animation_active` (contract Area 1: do not invent a
-/// second clock or second flag).
+/// cadence (no idle CPU spin). Read-only over the cached model; performs NO I/O.
 pub(crate) fn sidebar_wants_animation(
     model: &crate::client::supervisor::ClientSupervisorModel,
 ) -> bool {
@@ -2044,7 +2041,6 @@ pub(crate) fn sidebar_wants_animation(
         .agent_groups()
         .iter()
         .any(|g| g.agents.iter().any(|r| r.status == "working"))
-        || model.host_banner_animation_active()
         || model.add_remote_in_progress()
 }
 
@@ -5041,21 +5037,11 @@ mod tests {
         assert!(sidebar_wants_animation(&model));
     }
 
-    /// Force the host-banner animation off so a test can isolate the agent-driven animation
-    /// gate (item 2 (C3): a visible Secondary now animates its banner by default).
-    fn with_static_host_banner(model: &mut ClientSupervisorModel) {
-        let mut ui_settings = model.ui_settings().clone();
-        ui_settings.sidebar_host.animation = crate::config::HostBannerAnimation::Static;
-        model.set_ui_settings(ui_settings);
-    }
-
     #[test]
     fn sidebar_wants_animation_false_when_all_idle() {
-        // With the banner animation forced Static, only the agent gate remains — idle agents
-        // never request animation.
+        // Idle agents never request animation (host banners no longer animate at all).
         for status in ["idle", "done", "blocked", "unknown"] {
-            let (mut model, _) = model_with_agent_status(status);
-            with_static_host_banner(&mut model);
+            let (model, _) = model_with_agent_status(status);
             assert!(
                 !sidebar_wants_animation(&model),
                 "status {status:?} should not request animation"
@@ -5064,46 +5050,10 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_wants_animation_true_with_banner() {
-        // item 2 (C3): the banner hook is now the real gate. With no working agent the gate is
-        // driven solely by `host_banner_animation_active` — a visible Secondary with the default
-        // Animated setting makes the gate true (proving the banner hook is the single
-        // banner-active input the gate reads).
-        let (model, _) = model_with_agent_status("idle");
-        assert!(model.host_banner_animation_active());
-        assert!(sidebar_wants_animation(&model));
-        assert_eq!(
-            sidebar_wants_animation(&model),
-            model.host_banner_animation_active(),
-            "with no working agent the gate equals the banner hook"
-        );
-    }
-
-    // A working agent flows through the detection setter so the placeholder terminal renders in
-    // `Working` state (the shared renderer animates it with the client's spinner tick). Upstream
-    // has no live working-duration display, so the PoC's `working_since` seeding is not ported.
-    #[test]
-    fn working_agent_status_projects_working_terminal_state() {
-        let (model, _remote_id) = model_with_agent_status("working");
-        let compositor = ClientCompositor::new(26);
-        let snapshot =
-            ClientSidebarSnapshot::from_model(&model, &compositor, 26, 60, 16, Instant::now());
-
-        assert!(
-            snapshot
-                .app
-                .terminals
-                .values()
-                .any(|terminal| terminal.state == AgentState::Working),
-            "a working remote agent should project a Working placeholder terminal"
-        );
-    }
-
-    #[test]
-    fn disabled_remote_agent_rows_do_not_gate_animation() {
-        // A disabled remote's placeholder rows are not `working`, so they never request
-        // animation on themselves (parity with the render==hit_test disabled-row rejection).
-        let mut model = ClientSupervisorModel::new("local");
+    fn sidebar_wants_animation_false_with_idle_agents_and_banner() {
+        // Host banners no longer animate (the style options were removed), so a visible
+        // Secondary with idle agents must NOT request the animation cadence.
+        let (mut model, _) = model_with_agent_status("idle");
         let remote_id = model.add_secondary(crate::remote_registry::RemoteDefinitionSnapshot {
             id: "remote-x".into(),
             name: "x".into(),
@@ -5120,9 +5070,6 @@ mod tests {
                 crate::client::supervisor::ConnectionState::Disconnected,
             )
             .unwrap();
-        // Force the banner animation Static to isolate the agent gate: a disconnected remote's
-        // placeholder rows are not `working`, so they never request animation on themselves.
-        with_static_host_banner(&mut model);
         assert!(!sidebar_wants_animation(&model));
     }
 

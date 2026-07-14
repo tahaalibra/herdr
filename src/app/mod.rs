@@ -621,7 +621,6 @@ impl App {
             agent_panel_sort,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
-            sidebar_host: config.ui.sidebar.host.clone(),
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,
@@ -1442,7 +1441,6 @@ impl App {
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
-                self.state.sidebar_host = config.ui.sidebar.host.clone();
                 self.state.agent_panel_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
@@ -2480,80 +2478,6 @@ mod tests {
     }
 
     #[test]
-    fn save_sidebar_host_preferences_writes_body() {
-        let _guard = config_env_lock().lock().unwrap();
-        let path = temp_config_path("settings-save-sidebar-host");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "onboarding = false\n").unwrap();
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
-
-        let mut app = test_app();
-        let preferences = crate::config::SidebarHostConfig {
-            gradient: crate::config::HostBannerGradient::Cool,
-            animation: crate::config::HostBannerAnimation::Static,
-            speed: crate::config::HostBannerSpeed::Lively,
-            glyph: crate::config::HostBannerGlyph::None,
-            show_count: true,
-            show_metrics: true,
-        };
-
-        assert!(app.save_sidebar_host_preferences(preferences.clone()));
-
-        // The flat [ui.sidebar.host] body is written and live-reloaded into state.
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("[ui.sidebar.host]"));
-        assert!(content.contains(r#"gradient = "cool""#));
-        assert!(content.contains(r#"animation = "static""#));
-        assert!(content.contains(r#"speed = "lively""#));
-        assert!(content.contains(r#"glyph = "none""#));
-        assert!(content.contains("show_count = true"));
-        assert!(content.contains("show_metrics = true"));
-        assert_eq!(app.state.sidebar_host, preferences);
-        assert!(app.state.config_diagnostic.is_none());
-
-        // Round-trips back to the same SidebarHostConfig.
-        let reparsed: crate::config::Config = toml::from_str(&content).unwrap();
-        assert_eq!(reparsed.ui.sidebar.host, preferences);
-
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[test]
-    fn host_setting_toggle_mutates_state_immediately() {
-        // Cycling an option mutates AppState.sidebar_host immediately (so the live demo
-        // reflects the change at once) and persists it through the save round-trip + live
-        // reload (immediate-save invariant). A config path is wired so the save succeeds.
-        let _guard = config_env_lock().lock().unwrap();
-        let path = temp_config_path("settings-host-toggle");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "onboarding = false\n").unwrap();
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
-
-        let mut app = test_app();
-        app.state.mode = Mode::Settings;
-        app.state.settings.section = state::SettingsSection::SidebarHost;
-        // Focus the glyph row (index 3) and cycle it with Space.
-        app.state.settings.list.selected = 3;
-        assert_eq!(
-            app.state.sidebar_host.glyph,
-            crate::config::HostBannerGlyph::Left
-        );
-
-        app.handle_settings_key(KeyEvent::from(KeyCode::Char(' ')));
-
-        assert_eq!(
-            app.state.sidebar_host.glyph,
-            crate::config::HostBannerGlyph::None
-        );
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains(r#"glyph = "none""#));
-
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[test]
     fn api_server_ui_settings_returns_live_sidebar_preferences() {
         let mut app = test_app();
         app.state.sidebar_width = 31;
@@ -2569,11 +2493,6 @@ mod tests {
         let mut agents = app.state.sidebar_agents.clone();
         agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
         app.state.sidebar_agents = agents.clone();
-
-        let mut host = app.state.sidebar_host.clone();
-        host.gradient = crate::config::HostBannerGradient::Cool;
-        host.show_count = true;
-        app.state.sidebar_host = host.clone();
 
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req_ui_settings".into(),
@@ -2593,7 +2512,6 @@ mod tests {
                 assert_eq!(settings.sidebar_section_split_per_mille, 400);
                 assert_eq!(settings.sidebar_spaces, spaces);
                 assert_eq!(settings.sidebar_agents, agents);
-                assert_eq!(settings.sidebar_host, host);
             }
             other => panic!("unexpected response: {other:?}"),
         }

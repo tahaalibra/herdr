@@ -31,7 +31,6 @@ pub struct UiSettingsInfo {
     pub sidebar_section_split_per_mille: u16,
     pub sidebar_spaces: crate::config::SpacesSidebarConfig,
     pub sidebar_agents: crate::config::AgentsSidebarConfig,
-    pub sidebar_host: crate::config::SidebarHostConfig,
 }
 
 impl Default for UiSettingsInfo {
@@ -45,7 +44,6 @@ impl Default for UiSettingsInfo {
             sidebar_section_split_per_mille: 500,
             sidebar_spaces: ui.sidebar.spaces,
             sidebar_agents: ui.sidebar.agents,
-            sidebar_host: ui.sidebar.host,
         }
     }
 }

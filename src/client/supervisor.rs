@@ -119,15 +119,7 @@ pub(crate) struct ManagedServer {
     pub(crate) connection_state: ConnectionState,
     pub(crate) summaries: ServerSummary,
     pub(crate) disabled: bool, // item 3 (serde-driven via registry; default false)
-    /// Recent round-trip samples (ms) for the host banner readout; capped at the last
-    /// [`HOST_PING_SAMPLE_WINDOW`] (issue #13). The banner shows their average.
-    pub(crate) ping_samples: std::collections::VecDeque<u32>,
-    /// Most recent downstream frame throughput from this host in bytes/sec, if measured.
-    pub(crate) download_bps: Option<u64>,
 }
-
-/// How many recent round-trip samples feed the host-banner ping average.
-pub(crate) const HOST_PING_SAMPLE_WINDOW: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServerDestination {
@@ -535,8 +527,6 @@ impl ClientSupervisorModel {
                 connection_state: ConnectionState::Connected,
                 summaries: ServerSummary::default(),
                 disabled: false,
-                ping_samples: std::collections::VecDeque::new(),
-                download_bps: None,
             }],
             filter: ServerFilter::All,
             active_server_id: ServerId::main(),
@@ -709,24 +699,6 @@ impl ClientSupervisorModel {
         }
         self.reconcile_new_workspace_picker();
         Ok(())
-    }
-
-    /// Record a round-trip latency sample (ms) for the host-banner ping average (issue #13),
-    /// keeping only the most recent [`HOST_PING_SAMPLE_WINDOW`] samples.
-    pub(crate) fn record_server_ping(&mut self, id: &ServerId, latency_ms: u32) {
-        if let Some(server) = self.server_mut(id) {
-            if server.ping_samples.len() >= HOST_PING_SAMPLE_WINDOW {
-                server.ping_samples.pop_front();
-            }
-            server.ping_samples.push_back(latency_ms);
-        }
-    }
-
-    /// Record the latest downstream throughput (bytes/sec) from a host for its banner readout.
-    pub(crate) fn set_server_download_bps(&mut self, id: &ServerId, bps: u64) {
-        if let Some(server) = self.server_mut(id) {
-            server.download_bps = Some(bps);
-        }
     }
 
     pub(crate) fn set_summary(&mut self, id: &ServerId, summary: ServerSummary) -> Result<(), ()> {
@@ -2066,20 +2038,11 @@ impl ClientSupervisorModel {
         for server in visible {
             let rows = workspace_rows_for_server(server, all_filter);
             if server.role == ServerRole::Secondary || banner_local {
-                let space_count = server
-                    .summaries
-                    .workspaces
-                    .iter()
-                    .filter(|workspace| !workspace.workspace_id.is_empty())
-                    .count();
                 specs.push((
                     row_offset,
                     crate::app::state::HostBannerSpec {
                         display_name: server.display_name.clone(),
                         connection_state: host_banner_state(server),
-                        space_count,
-                        latency_ms: server.avg_ping_ms(),
-                        download_bps: server.download_bps,
                     },
                 ));
             }
@@ -2135,15 +2098,6 @@ impl ClientSupervisorModel {
     /// in monolithic mode. This is read-only render state; never mutated during render.
     pub(crate) fn host_banner_active(&self) -> bool {
         !self.host_banner_specs().is_empty()
-    }
-
-    /// Whether a host banner is currently animating. The SINGLE banner-active input read by
-    /// `compositor::sidebar_wants_animation` (contract Area 1: do not invent a second clock or
-    /// second flag). `true` iff the animation is set to `Animated` AND at least one banner is
-    /// visible.
-    pub(crate) fn host_banner_animation_active(&self) -> bool {
-        self.ui_settings().sidebar_host.animation == crate::config::HostBannerAnimation::Animated
-            && self.host_banner_active()
     }
 
     pub(crate) fn agent_groups(&self) -> Vec<AgentSidebarGroup> {
@@ -2438,19 +2392,6 @@ fn managed_secondary(
         connection_state,
         summaries: ServerSummary::default(),
         disabled: definition.disabled, // item 3 (Area 5): gate input from the registry.
-        ping_samples: std::collections::VecDeque::new(),
-        download_bps: None,
-    }
-}
-
-impl ManagedServer {
-    /// Average of the recent round-trip samples (ms), or `None` until the first sample lands.
-    pub(crate) fn avg_ping_ms(&self) -> Option<u32> {
-        if self.ping_samples.is_empty() {
-            return None;
-        }
-        let sum: u64 = self.ping_samples.iter().map(|ms| *ms as u64).sum();
-        Some((sum / self.ping_samples.len() as u64) as u32)
     }
 }
 
@@ -2769,25 +2710,6 @@ mod tests {
         assert_eq!(outcome, AddRemoteFormOutcome::Redraw);
         assert!(model.add_remote_restart_confirm().is_some());
         assert_eq!(model.add_remote_form().unwrap().target, "macmini");
-    }
-
-    #[test]
-    fn host_banner_ping_average_caps_at_window_and_reports_rate() {
-        let mut model = ClientSupervisorModel::new("local");
-        let id = model.add_secondary(local_remote("m", "macmini", Some("macmini")));
-        // 11 samples; only the last 10 count: nine 100s + one 40 → (900+40)/10 = 94.
-        for ms in [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 40] {
-            model.record_server_ping(&id, ms);
-        }
-        model.set_server_download_bps(&id, 312_000);
-
-        let specs = model.host_banner_specs();
-        let (_, spec) = specs
-            .iter()
-            .find(|(_, spec)| spec.display_name == "macmini")
-            .expect("macmini banner spec");
-        assert_eq!(spec.latency_ms, Some(94));
-        assert_eq!(spec.download_bps, Some(312_000));
     }
 
     #[test]
@@ -4794,15 +4716,6 @@ mod tests {
         );
     }
 
-    fn set_host_animation(
-        model: &mut ClientSupervisorModel,
-        animation: crate::config::HostBannerAnimation,
-    ) {
-        let mut ui_settings = model.ui_settings().clone();
-        ui_settings.sidebar_host.animation = animation;
-        model.set_ui_settings(ui_settings);
-    }
-
     #[test]
     fn host_banner_specs_one_per_visible_remote() {
         use crate::app::state::HostBannerState;
@@ -4871,9 +4784,7 @@ mod tests {
         assert_eq!(specs[0].1.display_name, "local");
         assert_eq!(specs[1].1.display_name, "dev");
         assert_eq!(specs[1].1.connection_state, HostBannerState::Connected);
-        assert_eq!(specs[1].1.space_count, 2);
         assert_eq!(specs[2].1.display_name, "prod");
-        assert_eq!(specs[2].1.space_count, 1);
 
         // The insertion index precedes that host's first row in the flat workspace_rows() stream.
         let rows = model.workspace_rows();
@@ -4937,7 +4848,6 @@ mod tests {
         );
         let empty_spec = by_name("e");
         assert_eq!(empty_spec.connection_state, HostBannerState::Connected);
-        assert_eq!(empty_spec.space_count, 0);
     }
 
     #[test]
@@ -4948,21 +4858,6 @@ mod tests {
         // One visible secondary → active.
         model.add_secondary(ssh_remote("remote-x", "x", "x"));
         assert!(model.host_banner_active());
-    }
-
-    #[test]
-    fn host_banner_animation_active_gated() {
-        let mut model = ClientSupervisorModel::new("local");
-        // No remote → never active even when Animated.
-        set_host_animation(&mut model, crate::config::HostBannerAnimation::Animated);
-        assert!(!model.host_banner_animation_active());
-
-        model.add_secondary(ssh_remote("remote-x", "x", "x"));
-        // Animated + a banner → active (this feeds sidebar_wants_animation).
-        assert!(model.host_banner_animation_active());
-        // Static → not active even with a banner.
-        set_host_animation(&mut model, crate::config::HostBannerAnimation::Static);
-        assert!(!model.host_banner_animation_active());
     }
 
     // ----- item 3 (Area 5): disabled-gate + management overlay -------------------------------

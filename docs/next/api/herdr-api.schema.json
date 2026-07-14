@@ -6470,47 +6470,6 @@
           ],
           "type": "string"
         },
-        "HostBannerAnimation": {
-          "enum": [
-            "animated",
-            "static"
-          ],
-          "type": "string"
-        },
-        "HostBannerGlyph": {
-          "enum": [
-            "left",
-            "none"
-          ],
-          "type": "string"
-        },
-        "HostBannerGradient": {
-          "oneOf": [
-            {
-              "enum": [
-                "rainbow",
-                "accent",
-                "cool",
-                "warm",
-                "muted"
-              ],
-              "type": "string"
-            },
-            {
-              "const": "solid",
-              "description": "One flat theme color (accent), no per-character shading or animation.",
-              "type": "string"
-            }
-          ]
-        },
-        "HostBannerSpeed": {
-          "enum": [
-            "calm",
-            "normal",
-            "lively"
-          ],
-          "type": "string"
-        },
         "InstalledPluginInfo": {
           "properties": {
             "actions": {
@@ -9317,39 +9276,6 @@
           ],
           "type": "object"
         },
-        "SidebarHostConfig": {
-          "description": "Host-banner sidebar configuration. Styles the per-host banner row that\nsits above each remote host's spaces in a multi-server sidebar. There is\nno off switch — the banner is always drawn for remote hosts; only its\npresentation is configured here.\n\nDeserialization is hand-written via [`RawSidebarHostConfig`] so unknown\nTOML enum values fall back to the documented defaults instead of failing\nthe parse.",
-          "properties": {
-            "animation": {
-              "$ref": "#/schemas/success_response/$defs/HostBannerAnimation"
-            },
-            "glyph": {
-              "$ref": "#/schemas/success_response/$defs/HostBannerGlyph"
-            },
-            "gradient": {
-              "$ref": "#/schemas/success_response/$defs/HostBannerGradient"
-            },
-            "show_count": {
-              "type": "boolean"
-            },
-            "show_metrics": {
-              "description": "Show the live latency/throughput readout on connected host banners.",
-              "type": "boolean"
-            },
-            "speed": {
-              "$ref": "#/schemas/success_response/$defs/HostBannerSpeed"
-            }
-          },
-          "required": [
-            "gradient",
-            "animation",
-            "speed",
-            "glyph",
-            "show_count",
-            "show_metrics"
-          ],
-          "type": "object"
-        },
         "SpaceSidebarToken": {
           "description": "A builtin sidebar token name, or a `$`-prefixed custom metadata token",
           "type": "string"
@@ -9436,9 +9362,6 @@
               "minimum": 0,
               "type": "integer"
             },
-            "sidebar_host": {
-              "$ref": "#/schemas/success_response/$defs/SidebarHostConfig"
-            },
             "sidebar_max_width": {
               "format": "uint16",
               "maximum": 65535,
@@ -9474,8 +9397,7 @@
             "sidebar_max_width",
             "sidebar_section_split_per_mille",
             "sidebar_spaces",
-            "sidebar_agents",
-            "sidebar_host"
+            "sidebar_agents"
           ],
           "type": "object"
         },

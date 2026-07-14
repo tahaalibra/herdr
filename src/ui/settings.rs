@@ -138,9 +138,6 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
                 2,
             );
         }
-        SettingsSection::SidebarHost => {
-            render_settings_sidebar_host(app, frame, content_area);
-        }
         SettingsSection::PaneLabels => {
             render_settings_toggle(
                 frame,
@@ -416,89 +413,6 @@ fn render_settings_toggle(
     );
 }
 
-/// The `[ui.sidebar.host]` option list (no off control — the banner is always drawn for remote
-/// hosts; only its presentation is configured). Each row shows `label  < value >`; `count` is a
-/// checkbox. A labeled live demo banner follows so an immediate-save change is visible at once.
-fn render_settings_sidebar_host(app: &AppState, frame: &mut Frame, area: Rect) {
-    let p = &app.palette;
-    let [desc_area, _, list_area] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(1),
-        Constraint::Min(2),
-    ])
-    .areas::<3>(area);
-
-    super::widgets::render_modal_description(
-        frame,
-        desc_area,
-        "style the host banner drawn above each remote host's spaces",
-        Style::default().fg(p.overlay1),
-    );
-
-    let host = &app.sidebar_host;
-    let options: [(usize, &str, String); 6] = [
-        (0, "gradient", format!("< {} >", host.gradient.as_str())),
-        (1, "animation", format!("< {} >", host.animation.as_str())),
-        (2, "speed", format!("< {} >", host.speed.as_str())),
-        (3, "glyph", format!("< {} >", host.glyph.as_str())),
-        (
-            4,
-            "count",
-            format!(
-                "{} show space count",
-                if host.show_count { "[✓]" } else { "[ ]" }
-            ),
-        ),
-        (
-            5,
-            "metrics",
-            format!(
-                "{} show latency + throughput",
-                if host.show_metrics { "[✓]" } else { "[ ]" }
-            ),
-        ),
-    ];
-    for (idx, label, value) in options {
-        let style = if app.settings.list.selected == idx {
-            Style::default()
-                .bg(p.surface0)
-                .fg(p.text)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0)
-        };
-        let row = Rect::new(list_area.x, list_area.y + idx as u16, list_area.width, 1);
-        if row.y >= list_area.y + list_area.height {
-            break;
-        }
-        frame.render_widget(
-            Paragraph::new(format!(" {label}  {value}")).style(style),
-            row,
-        );
-    }
-
-    // The live demo banner, below the option rows.
-    let demo_title_y = list_area.y + 6;
-    if demo_title_y + 1 < list_area.y + list_area.height {
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                " demo host",
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-            )),
-            Rect::new(list_area.x, demo_title_y, list_area.width, 1),
-        );
-        frame.render_widget(
-            Paragraph::new(super::sidebar::settings_sidebar_host_demo_line(app)),
-            Rect::new(
-                list_area.x + 1,
-                demo_title_y + 1,
-                list_area.width.saturating_sub(1),
-                1,
-            ),
-        );
-    }
-}
-
 fn render_settings_experiments(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
     let [desc_area, _, list_area] = Layout::vertical([
@@ -588,45 +502,6 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("pane screen history [ ]"));
-    }
-
-    #[test]
-    fn host_settings_renders_options_and_demo() {
-        // The sidebar-host section renders the five options and a labeled demo banner — and NO
-        // off control (the banner is always drawn for remote hosts).
-        let mut app = AppState::test_new();
-        app.settings.section = SettingsSection::SidebarHost;
-        app.settings.list.selected = 0;
-        app.mode = Mode::Settings;
-
-        let mut terminal =
-            Terminal::new(TestBackend::new(80, 24)).expect("test terminal should initialize");
-        terminal
-            .draw(|frame| render_settings_overlay(&app, frame, Rect::new(0, 0, 80, 24)))
-            .expect("settings overlay should render");
-
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(rendered.contains("gradient"));
-        assert!(rendered.contains("solid"));
-        assert!(rendered.contains("animation"));
-        assert!(rendered.contains("animated"));
-        assert!(rendered.contains("speed"));
-        assert!(rendered.contains("calm"));
-        assert!(rendered.contains("glyph"));
-        assert!(rendered.contains("show space count"));
-        assert!(rendered.contains("show latency + throughput"));
-        assert!(rendered.contains("demo host"));
-        assert!(rendered.contains("demo"));
-        // No off control.
-        assert!(!rendered.contains("off"));
-        assert!(!rendered.contains("enabled"));
     }
 
     #[test]

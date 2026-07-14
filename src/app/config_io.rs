@@ -113,24 +113,6 @@ impl App {
         }
     }
 
-    pub(super) fn save_sidebar_host_preferences(
-        &mut self,
-        preferences: crate::config::SidebarHostConfig,
-    ) -> bool {
-        let saved = self.update_config_file("host sidebar preferences", |content| {
-            crate::config::upsert_section_body(
-                content,
-                "ui.sidebar.host",
-                &host_sidebar_config_body(&preferences),
-            )
-        });
-        if saved {
-            let report = self.apply_config_from_disk(false);
-            return report.status == crate::config::ConfigReloadStatus::Applied;
-        }
-        false
-    }
-
     pub(super) fn save_agent_panel_sort(&mut self, sort: crate::app::state::AgentPanelSort) {
         let value = match sort {
             crate::app::state::AgentPanelSort::Spaces => {
@@ -151,19 +133,4 @@ impl App {
             self.apply_config_from_disk(false);
         }
     }
-}
-
-/// Flat `key = value` body for `[ui.sidebar.host]` (NOT a rows/array writer — the host group
-/// is not item-based). Mirrors the enum `as_str()` mapping so the round-trip re-parses to the
-/// same `SidebarHostConfig`.
-fn host_sidebar_config_body(preferences: &crate::config::SidebarHostConfig) -> String {
-    format!(
-        "gradient = \"{}\"\nanimation = \"{}\"\nspeed = \"{}\"\nglyph = \"{}\"\nshow_count = {}\nshow_metrics = {}\n",
-        preferences.gradient.as_str(),
-        preferences.animation.as_str(),
-        preferences.speed.as_str(),
-        preferences.glyph.as_str(),
-        preferences.show_count,
-        preferences.show_metrics,
-    )
 }

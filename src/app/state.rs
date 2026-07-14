@@ -607,19 +607,15 @@ pub struct WorkspaceCardArea {
 pub struct HostBannerSpec {
     pub display_name: String,
     pub connection_state: HostBannerState,
-    pub space_count: usize,
-    /// Rolling average round-trip latency to this host in ms, if measured.
-    pub latency_ms: Option<u32>,
-    /// Recent downstream frame throughput from this host in bytes/sec, if measured.
-    pub download_bps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostBannerState {
+    // Every variant is constructed by the unix-only client supervisor's
+    // connection-state projection; the shared sidebar renderer only matches
+    // them, so Windows never builds a constructor.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Connected,
-    // The non-Connected variants are constructed by the unix-only client
-    // supervisor's connection-state projection; the shared sidebar renderer
-    // only matches them, so Windows never builds a constructor.
     #[cfg_attr(not(unix), allow(dead_code))]
     Connecting,
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -996,8 +992,6 @@ pub enum SettingsSection {
     Theme,
     Sound,
     Toast,
-    /// `[ui.sidebar.host]` presentation options for remote host banners.
-    SidebarHost,
     PaneLabels,
     Experiments,
     Integrations,
@@ -1008,7 +1002,6 @@ impl SettingsSection {
         Self::Theme,
         Self::Sound,
         Self::Toast,
-        Self::SidebarHost,
         Self::PaneLabels,
         Self::Integrations,
         Self::Experiments,
@@ -1019,7 +1012,6 @@ impl SettingsSection {
             Self::Theme => "theme",
             Self::Sound => "sound",
             Self::Toast => "toasts",
-            Self::SidebarHost => "sidebar",
             Self::PaneLabels => "pane labels",
             Self::Experiments => "experiments",
             Self::Integrations => "integrations",
@@ -1518,7 +1510,6 @@ pub struct AppState {
     pub agent_panel_sort: AgentPanelSort,
     pub sidebar_agents: crate::config::AgentsSidebarConfig,
     pub sidebar_spaces: crate::config::SpacesSidebarConfig,
-    pub sidebar_host: crate::config::SidebarHostConfig,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
     /// captures mouse while the focused pane app requests mouse reporting.
@@ -1912,7 +1903,7 @@ impl AppState {
             agent_panel_sort: AgentPanelSort::Spaces,
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
-            sidebar_host: crate::config::SidebarHostConfig::default(),
+
             next_agent_state_change_seq: 0,
             mouse_capture: true,
             copy_on_select: true,
@@ -2376,10 +2367,6 @@ mod tests {
         assert!(app.host_banners.is_empty());
         assert!(app.host_banner_rows.is_empty());
         assert!(!app.host_banner_active);
-        assert_eq!(
-            app.sidebar_host,
-            crate::config::SidebarHostConfig::default()
-        );
         assert!(app.sidebar_hover.is_none());
     }
 
@@ -2454,12 +2441,8 @@ mod tests {
         let spec = HostBannerSpec {
             display_name: "prod".into(),
             connection_state: HostBannerState::Connected,
-            space_count: 2,
-            latency_ms: None,
-            download_bps: None,
         };
         assert_eq!(spec.display_name, "prod");
-        assert_eq!(spec.space_count, 2);
         // every connection-state variant exists (server state maps onto these).
         for state in [
             HostBannerState::Connected,
@@ -2472,9 +2455,6 @@ mod tests {
                 HostBannerSpec {
                     display_name: spec.display_name.clone(),
                     connection_state: state,
-                    space_count: spec.space_count,
-                    latency_ms: None,
-                    download_bps: None,
                 }
                 .connection_state,
                 state

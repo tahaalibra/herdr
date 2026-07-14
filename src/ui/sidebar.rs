@@ -2,7 +2,7 @@ mod tokens;
 
 use ratatui::{
     layout::{Alignment, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -278,109 +278,16 @@ pub(crate) fn grouped_child_display_label(
         .to_string()
 }
 
-// Lolcat-style per-character RGB gradient for the host banner name. Pure: the only animation
-// input is `tick` (fed from the client animation tick via `app.spinner_tick`; a frozen
-// `tick == 0` yields a fixed-but-correct spatial rainbow). A luma floor keeps every character
-// legible on the dark sidebar; speed `0.0` freezes the snapshot (Static mode).
-const HOST_BANNER_MIN_LUMA: f32 = 0.45;
-const HOST_BANNER_MAX_LUMA: f32 = 1.00;
-const HOST_BANNER_FREQ: f32 = 0.30;
-
-/// Deterministic RGB for `(tick, char_index)`. `speed == 0.0` => static snapshot (Static
-/// mode / frozen tick). Used both for the full rainbow sweep and (with a single base hue) the
-/// solid presets via [`host_banner_base_color`].
-fn host_banner_rgb(tick: u32, char_index: usize, freq: f32, speed: f32) -> (u8, u8, u8) {
-    let phase = freq * char_index as f32 + speed * tick as f32;
-    let chan = |offset: f32| -> u8 {
-        let raw = (phase + offset).sin() * 0.5 + 0.5; // 0.0..=1.0
-        let lit = HOST_BANNER_MIN_LUMA + raw * (HOST_BANNER_MAX_LUMA - HOST_BANNER_MIN_LUMA);
-        (lit * 255.0).round().clamp(0.0, 255.0) as u8
-    };
-    (
-        chan(0.0),
-        chan(std::f32::consts::TAU / 3.0),
-        chan(2.0 * std::f32::consts::TAU / 3.0),
+/// The bold host-banner name span: one flat theme accent color, no gradients
+/// or animation (the former `[ui.sidebar.host]` style knobs were removed).
+fn host_banner_name_span(name: &str, p: &Palette) -> Span<'static> {
+    Span::styled(
+        name.to_string(),
+        Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
     )
 }
 
-/// The solid base color a non-rainbow gradient preset modulates. `Rainbow` returns `None`
-/// (full 3-phase sweep); the other presets map onto the matching palette colors and modulate
-/// only luma (hue fixed).
-fn host_banner_base_color(
-    gradient: crate::config::HostBannerGradient,
-    p: &Palette,
-) -> Option<Color> {
-    use crate::config::HostBannerGradient;
-    match gradient {
-        // Solid is handled before base-color scaling in `host_banner_spans`.
-        HostBannerGradient::Solid => Some(p.accent),
-        HostBannerGradient::Rainbow => None,
-        HostBannerGradient::Accent => Some(p.accent),
-        HostBannerGradient::Cool => Some(p.teal),
-        HostBannerGradient::Warm => Some(p.peach),
-        HostBannerGradient::Muted => Some(p.overlay1),
-    }
-}
-
-/// Scale an `(r, g, b)` base color by a luma factor (floored for legibility), returning a
-/// `Color::Rgb` for the solid (non-rainbow) presets.
-fn host_banner_scaled(base: (u8, u8, u8), char_index: usize, tick: u32, speed: f32) -> Color {
-    let phase = HOST_BANNER_FREQ * char_index as f32 + speed * tick as f32;
-    let raw = phase.sin() * 0.5 + 0.5; // 0.0..=1.0
-    let factor = HOST_BANNER_MIN_LUMA + raw * (HOST_BANNER_MAX_LUMA - HOST_BANNER_MIN_LUMA);
-    let scale = |c: u8| (c as f32 * factor).round().clamp(0.0, 255.0) as u8;
-    Color::Rgb(scale(base.0), scale(base.1), scale(base.2))
-}
-
-/// Per-character bold gradient spans for a host banner name. One `Span` per char, `fg =
-/// Color::Rgb`, `Modifier::BOLD`. `Static` animation freezes the gradient (speed 0).
-fn host_banner_spans(
-    name: &str,
-    tick: u32,
-    cfg: &crate::config::SidebarHostConfig,
-    p: &Palette,
-) -> Vec<Span<'static>> {
-    use crate::config::HostBannerAnimation;
-    // Solid mode: one flat theme color for the whole name — no per-character
-    // luma wave and no animation, regardless of the animation setting.
-    if cfg.gradient == crate::config::HostBannerGradient::Solid {
-        return vec![Span::styled(
-            name.to_string(),
-            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-        )];
-    }
-    let speed = match cfg.animation {
-        HostBannerAnimation::Static => 0.0,
-        HostBannerAnimation::Animated => cfg.speed.drift(),
-    };
-    let base = host_banner_base_color(cfg.gradient, p).map(|color| match color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        // Non-Rgb palette colors (possible with the 16-color terminal palette) fall back to text.
-        _ => match p.text {
-            Color::Rgb(r, g, b) => (r, g, b),
-            _ => (205, 214, 244),
-        },
-    });
-    name.chars()
-        .enumerate()
-        .map(|(idx, ch)| {
-            let color = match base {
-                Some(base) => host_banner_scaled(base, idx, tick, speed),
-                None => {
-                    let (r, g, b) = host_banner_rgb(tick, idx, HOST_BANNER_FREQ, speed);
-                    Color::Rgb(r, g, b)
-                }
-            };
-            Span::styled(
-                ch.to_string(),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )
-        })
-        .collect()
-}
-
-/// The leading connection-state glyph for a host banner (when `cfg.glyph == Left`).
-/// `Connected` uses the gradient first-char color; the caller picks the color.
+/// The leading connection-state glyph for a host banner.
 fn host_banner_glyph(state: crate::app::state::HostBannerState) -> &'static str {
     use crate::app::state::HostBannerState;
     match state {
@@ -392,89 +299,17 @@ fn host_banner_glyph(state: crate::app::state::HostBannerState) -> &'static str 
     }
 }
 
-/// The dim suffix that follows the host name, keyed off the banner state. `Connected` only
-/// shows `· N spaces` when `show_count` is set; the other states surface the state word.
-fn host_banner_suffix(
-    state: crate::app::state::HostBannerState,
-    space_count: usize,
-    show_count: bool,
-) -> Option<String> {
+/// The dim suffix that follows the host name, keyed off the banner state.
+/// `Connected` shows nothing; the other states surface the state word.
+fn host_banner_suffix(state: crate::app::state::HostBannerState) -> Option<&'static str> {
     use crate::app::state::HostBannerState;
     match state {
-        HostBannerState::Connected => show_count.then(|| format!(" · {space_count} spaces")),
-        HostBannerState::Connecting => Some(" · connecting".to_string()),
-        HostBannerState::Disconnected => Some(" · offline".to_string()),
-        HostBannerState::ProtocolMismatch => Some(" · protocol mismatch".to_string()),
-        HostBannerState::Disabled => Some(" · disabled".to_string()),
+        HostBannerState::Connected => None,
+        HostBannerState::Connecting => Some(" · connecting"),
+        HostBannerState::Disconnected => Some(" · offline"),
+        HostBannerState::ProtocolMismatch => Some(" · protocol mismatch"),
+        HostBannerState::Disabled => Some(" · disabled"),
     }
-}
-
-/// Human-readable downstream rate for the host banner, e.g. `312kb/s`, `1.2mb/s`.
-fn format_download_rate(bps: u64) -> String {
-    if bps >= 1_000_000 {
-        format!("{:.1}mb/s", bps as f64 / 1_000_000.0)
-    } else if bps >= 1_000 {
-        format!("{}kb/s", bps / 1_000)
-    } else {
-        format!("{bps}b/s")
-    }
-}
-
-/// Color-grade a host by health: green when smooth, yellow when warming, peach when laggy, red
-/// when down/incompatible, dim until the first latency sample.
-fn host_health_color(
-    latency_ms: Option<u32>,
-    state: crate::app::state::HostBannerState,
-    p: &Palette,
-) -> Color {
-    use crate::app::state::HostBannerState;
-    match state {
-        HostBannerState::Disconnected | HostBannerState::ProtocolMismatch => return p.red,
-        HostBannerState::Disabled => return p.overlay0,
-        _ => {}
-    }
-    match latency_ms {
-        None => p.overlay0,
-        Some(ms) if ms <= 80 => p.green,
-        Some(ms) if ms <= 200 => p.yellow,
-        Some(_) => p.peach,
-    }
-}
-
-/// Build the right-aligned banner metric spans (`↓312kb/s 50ms`) and their display width. Empty
-/// when nothing has been measured yet. The download rate is dim; the ping is health-graded so a
-/// glance reads green=smooth … red=laggy.
-fn host_banner_metric_spans(
-    spec: &crate::app::state::HostBannerSpec,
-    p: &Palette,
-) -> (Vec<Span<'static>>, usize) {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut text = String::new();
-    let health = host_health_color(spec.latency_ms, spec.connection_state, p);
-
-    if let Some(bps) = spec.download_bps.filter(|bps| *bps > 0) {
-        let rate = format_download_rate(bps);
-        spans.push(Span::styled("↓", Style::default().fg(p.teal)));
-        spans.push(Span::styled(rate.clone(), Style::default().fg(p.overlay1)));
-        text.push('↓');
-        text.push_str(&rate);
-    }
-
-    if let Some(ms) = spec.latency_ms {
-        if !text.is_empty() {
-            spans.push(Span::raw(" "));
-            text.push(' ');
-        }
-        let ping = format!("{ms}ms");
-        spans.push(Span::styled(
-            ping.clone(),
-            Style::default().fg(health).add_modifier(Modifier::BOLD),
-        ));
-        text.push_str(&ping);
-    }
-
-    let width = display_width(&text);
-    (spans, width)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1599,8 +1434,8 @@ fn render_workspace_list(
 
     // Draw each host banner at its rect from `app.view.host_banner_areas` (the SAME single
     // `compute_workspace_list_areas_full` pass that produced the card geometry, so render never
-    // recomputes a banner y — render == hit_test). Content left→right: optional connection
-    // glyph, the per-char lolcat gradient host name (bold), an optional dim suffix.
+    // recomputes a banner y — render == hit_test). Content left→right: connection glyph, the
+    // solid theme-accent host name (bold), an optional dim state suffix.
     for (host_idx, banner_area) in app.view.host_banner_areas.iter().enumerate() {
         let row_y = banner_area.rect.y;
         if row_y >= list_bottom {
@@ -1617,58 +1452,27 @@ fn render_workspace_list(
                 buf[(x, row_y)].set_style(Style::default().bg(p.surface1));
             }
         }
-        let name_spans =
-            host_banner_spans(&spec.display_name, app.spinner_tick, &app.sidebar_host, p);
         let glyph_color = match spec.connection_state {
-            crate::app::state::HostBannerState::Connected => name_spans
-                .first()
-                .and_then(|span| span.style.fg)
-                .unwrap_or(p.overlay0),
+            crate::app::state::HostBannerState::Connected => p.accent,
             crate::app::state::HostBannerState::ProtocolMismatch
             | crate::app::state::HostBannerState::Disconnected => p.red,
             _ => p.overlay0,
         };
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        if app.sidebar_host.glyph == crate::config::HostBannerGlyph::Left {
-            spans.push(Span::styled(
+        let mut spans: Vec<Span<'static>> = vec![
+            Span::styled(
                 host_banner_glyph(spec.connection_state),
                 Style::default().fg(glyph_color),
-            ));
-            spans.push(Span::raw(" "));
-        }
-        spans.extend(name_spans);
-        if let Some(suffix) = host_banner_suffix(
-            spec.connection_state,
-            spec.space_count,
-            app.sidebar_host.show_count,
-        ) {
+            ),
+            Span::raw(" "),
+            host_banner_name_span(&spec.display_name, p),
+        ];
+        if let Some(suffix) = host_banner_suffix(spec.connection_state) {
             spans.push(Span::styled(suffix, Style::default().fg(p.overlay0)));
         }
-        // Left side (glyph + rainbow name + suffix): its display width gates whether the metric fits.
-        let name_width: usize = spans
-            .iter()
-            .map(|span| display_width(span.content.as_ref()))
-            .sum();
         frame.render_widget(
             Paragraph::new(Line::from(spans)),
             Rect::new(banner_area.rect.x, row_y, banner_area.rect.width, 1),
         );
-
-        // Right-aligned `↓rate ping` health readout, opt-in via
-        // `[ui.sidebar.host] show_metrics`. Drawn in its own sub-rect at the right
-        // edge so it never erases the name; skipped when the row is too narrow to fit it with
-        // at least one column of breathing room.
-        if app.sidebar_host.show_metrics {
-            let (metric_spans, metric_width) = host_banner_metric_spans(spec, p);
-            let banner_width = banner_area.rect.width as usize;
-            if metric_width > 0 && banner_width > name_width + metric_width {
-                let metric_x = banner_area.rect.x + banner_area.rect.width - metric_width as u16;
-                frame.render_widget(
-                    Paragraph::new(Line::from(metric_spans)),
-                    Rect::new(metric_x, row_y, metric_width as u16, 1),
-                );
-            }
-        }
     }
 
     // Draw the local→remote divider rule at each `y` from `app.view.divider_rows`. The `y`s
@@ -1892,32 +1696,6 @@ fn render_agent_detail(
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
-}
-
-/// A labeled live demo banner for the host-settings panel — the same glyph + per-char lolcat
-/// gradient name + optional suffix the real banner renders, so changing a setting
-/// (immediate-save) updates the demo. Uses a fixed `"demo"` host name.
-pub(crate) fn settings_sidebar_host_demo_line(app: &AppState) -> Line<'static> {
-    let p = &app.palette;
-    let spec_state = crate::app::state::HostBannerState::Connected;
-    let name_spans = host_banner_spans("demo", app.spinner_tick, &app.sidebar_host, p);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    if app.sidebar_host.glyph == crate::config::HostBannerGlyph::Left {
-        let glyph_color = name_spans
-            .first()
-            .and_then(|span| span.style.fg)
-            .unwrap_or(p.overlay0);
-        spans.push(Span::styled(
-            host_banner_glyph(spec_state),
-            Style::default().fg(glyph_color),
-        ));
-        spans.push(Span::raw(" "));
-    }
-    spans.extend(name_spans);
-    if let Some(suffix) = host_banner_suffix(spec_state, 3, app.sidebar_host.show_count) {
-        spans.push(Span::styled(suffix, Style::default().fg(p.overlay0)));
-    }
-    Line::from(spans)
 }
 
 pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
@@ -2862,55 +2640,6 @@ mod tests {
 
     // ---- host banner readouts ----
 
-    #[test]
-    fn format_download_rate_scales_units() {
-        assert_eq!(format_download_rate(512), "512b/s");
-        assert_eq!(format_download_rate(312_000), "312kb/s");
-        assert_eq!(format_download_rate(1_500_000), "1.5mb/s");
-    }
-
-    #[test]
-    fn host_health_color_grades_by_latency() {
-        let p = Palette::catppuccin();
-        use crate::app::state::HostBannerState::Connected;
-        assert_eq!(host_health_color(None, Connected, &p), p.overlay0);
-        assert_eq!(host_health_color(Some(40), Connected, &p), p.green);
-        assert_eq!(host_health_color(Some(120), Connected, &p), p.yellow);
-        assert_eq!(host_health_color(Some(400), Connected, &p), p.peach);
-        // A down host is always red regardless of any stale latency sample.
-        assert_eq!(
-            host_health_color(
-                Some(5),
-                crate::app::state::HostBannerState::Disconnected,
-                &p
-            ),
-            p.red
-        );
-    }
-
-    #[test]
-    fn host_banner_metric_spans_combine_rate_and_ping() {
-        let p = Palette::catppuccin();
-        let spec = crate::app::state::HostBannerSpec {
-            display_name: "macmini".into(),
-            connection_state: crate::app::state::HostBannerState::Connected,
-            space_count: 1,
-            latency_ms: Some(50),
-            download_bps: Some(312_000),
-        };
-        let (spans, width) = host_banner_metric_spans(&spec, &p);
-        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "↓312kb/s 50ms");
-        assert!(width > 0);
-        // Nothing measured → no metric.
-        let empty = crate::app::state::HostBannerSpec {
-            latency_ms: None,
-            download_bps: None,
-            ..spec
-        };
-        assert_eq!(host_banner_metric_spans(&empty, &p).1, 0);
-    }
-
     // ---- hover render precedence + distinct subtle style ----
 
     fn two_card_hover_app() -> AppState {
@@ -3415,9 +3144,6 @@ mod tests {
             .map(|(i, (_, state))| HostBannerSpec {
                 display_name: format!("host{i}"),
                 connection_state: *state,
-                space_count: 1,
-                latency_ms: None,
-                download_bps: None,
             })
             .collect();
         app.host_banner_active = !banner_rows.is_empty();
@@ -3529,109 +3255,14 @@ mod tests {
     }
 
     #[test]
-    fn host_banner_rgb_deterministic() {
-        // Fixed inputs → fixed RGB; advancing tick (speed>0) or char_index changes color.
-        let a = host_banner_rgb(0, 0, HOST_BANNER_FREQ, 0.1);
-        let b = host_banner_rgb(0, 0, HOST_BANNER_FREQ, 0.1);
-        assert_eq!(a, b, "deterministic for fixed inputs");
-        assert_ne!(
-            a,
-            host_banner_rgb(50, 0, HOST_BANNER_FREQ, 0.1),
-            "advancing tick changes color"
-        );
-        assert_ne!(
-            a,
-            host_banner_rgb(0, 4, HOST_BANNER_FREQ, 0.1),
-            "advancing char_index changes color"
-        );
-    }
-
-    #[test]
-    fn host_banner_rgb_luma_floor() {
-        // Every channel stays at/above the legibility floor across a sweep of tick/char_index.
-        let floor = (HOST_BANNER_MIN_LUMA * 255.0).floor() as u8;
-        for tick in 0u32..40 {
-            for idx in 0usize..16 {
-                let (r, g, b) = host_banner_rgb(tick, idx, HOST_BANNER_FREQ, 0.1);
-                assert!(
-                    r >= floor && g >= floor && b >= floor,
-                    "near-black at {tick}/{idx}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn host_banner_static_ignores_tick() {
-        let p = Palette::catppuccin();
-        let colors = |spans: &[Span<'static>]| spans.iter().map(|s| s.style.fg).collect::<Vec<_>>();
-
-        // Static (speed 0): tick 0 == tick N. Uses the rainbow preset explicitly —
-        // the solid default renders one flat span and never animates.
-        let static_cfg = crate::config::SidebarHostConfig {
-            gradient: crate::config::HostBannerGradient::Rainbow,
-            animation: crate::config::HostBannerAnimation::Static,
-            ..Default::default()
-        };
-        let at_0 = host_banner_spans("demo", 0, &static_cfg, &p);
-        let at_n = host_banner_spans("demo", 64, &static_cfg, &p);
-        assert_eq!(colors(&at_0), colors(&at_n), "static ignores tick");
-
-        // Animated: tick 0 differs from tick N.
-        let anim_cfg = crate::config::SidebarHostConfig {
-            gradient: crate::config::HostBannerGradient::Rainbow,
-            animation: crate::config::HostBannerAnimation::Animated,
-            speed: crate::config::HostBannerSpeed::Lively,
-            ..Default::default()
-        };
-        let anim_0 = host_banner_spans("demo", 0, &anim_cfg, &p);
-        let anim_n = host_banner_spans("demo", 64, &anim_cfg, &p);
-        assert_ne!(
-            colors(&anim_0),
-            colors(&anim_n),
-            "animated advances with tick"
-        );
-    }
-
-    #[test]
     fn host_banner_solid_renders_one_flat_accent_span() {
-        // The solid default paints the whole name as a single flat accent span:
-        // no per-character shading and no animation drift between ticks.
+        // The host name is one flat bold accent span — no per-character shading
+        // and nothing tick-dependent (the style options were removed).
         let p = Palette::catppuccin();
-        let cfg = crate::config::SidebarHostConfig::default();
-        assert_eq!(cfg.gradient, crate::config::HostBannerGradient::Solid);
-
-        let at_0 = host_banner_spans("demo", 0, &cfg, &p);
-        let at_n = host_banner_spans("demo", 64, &cfg, &p);
-
-        assert_eq!(at_0.len(), 1, "solid renders one span for the whole name");
-        assert_eq!(at_0[0].content.as_ref(), "demo");
-        assert_eq!(at_0[0].style.fg, Some(p.accent));
-        assert_eq!(at_0, at_n, "solid never animates");
-    }
-
-    #[test]
-    fn host_banner_non_rainbow_uses_base_color() {
-        let p = Palette::catppuccin();
-        // Rainbow → no base (full sweep).
-        assert!(host_banner_base_color(crate::config::HostBannerGradient::Rainbow, &p).is_none());
-        // Solid presets derive from the matching palette colors.
-        assert_eq!(
-            host_banner_base_color(crate::config::HostBannerGradient::Accent, &p),
-            Some(p.accent)
-        );
-        assert_eq!(
-            host_banner_base_color(crate::config::HostBannerGradient::Cool, &p),
-            Some(p.teal)
-        );
-        assert_eq!(
-            host_banner_base_color(crate::config::HostBannerGradient::Warm, &p),
-            Some(p.peach)
-        );
-        assert_eq!(
-            host_banner_base_color(crate::config::HostBannerGradient::Muted, &p),
-            Some(p.overlay1)
-        );
+        let span = host_banner_name_span("demo", &p);
+        assert_eq!(span.content.as_ref(), "demo");
+        assert_eq!(span.style.fg, Some(p.accent));
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
     }
 
     fn prepared_host_banner_app(
@@ -3652,34 +3283,32 @@ mod tests {
     }
 
     #[test]
-    fn connected_banner_renders_rgb_name_span() {
+    fn connected_banner_renders_solid_accent_name_span() {
         let mut app =
             prepared_host_banner_app(&[false, true], &[1], &[HostBannerState::Connected], 40, 20);
         app.host_banners[0].display_name = "prod".into();
-        app.host_banners[0].space_count = 2;
-        app.sidebar_host.show_count = true;
         let banner_y = app.view.host_banner_areas[0].rect.y;
         let buffer = render_divider_buffer(&app, 40, 20);
 
-        // The host name renders as bold Color::Rgb cells.
-        let mut found_rgb_bold = false;
+        // The host name renders as bold theme-accent cells.
+        let mut found_accent_bold = false;
         for x in 0..40u16 {
             let cell = &buffer[(x, banner_y)];
-            if matches!(cell.style().fg, Some(Color::Rgb(_, _, _)))
+            if cell.style().fg == Some(app.palette.accent)
                 && cell.style().add_modifier.contains(Modifier::BOLD)
                 && cell.symbol() != " "
             {
-                found_rgb_bold = true;
+                found_accent_bold = true;
             }
         }
-        assert!(found_rgb_bold, "banner name should be bold Color::Rgb");
+        assert!(found_accent_bold, "banner name should be bold accent");
 
         let row = buffer_row_text(&buffer, banner_y, 40);
         assert!(row.contains("prod"), "banner shows host name: {row:?}");
         assert!(row.contains('◆'), "connected glyph `◆`: {row:?}");
         assert!(
-            row.contains("2 spaces"),
-            "show_count suffix `· 2 spaces`: {row:?}"
+            !row.contains("spaces"),
+            "no space-count suffix on connected banners: {row:?}"
         );
     }
 
@@ -3748,23 +3377,5 @@ mod tests {
             (0..30u16).any(|x| buffer[(x, banner_y)].style().bg == Some(app.palette.surface1)),
             "dragged host banner row lifts with surface1"
         );
-    }
-
-    #[test]
-    fn settings_host_demo_line_tracks_glyph_and_count() {
-        let mut app = AppState::test_new();
-        app.sidebar_host.show_count = true;
-        let line = settings_sidebar_host_demo_line(&app);
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("demo"), "demo name rendered: {text:?}");
-        assert!(text.contains('◆'), "left glyph rendered: {text:?}");
-        assert!(text.contains("3 spaces"), "count suffix rendered: {text:?}");
-
-        app.sidebar_host.glyph = crate::config::HostBannerGlyph::None;
-        app.sidebar_host.show_count = false;
-        let line = settings_sidebar_host_demo_line(&app);
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!text.contains('◆'), "glyph hidden: {text:?}");
-        assert!(!text.contains("spaces"), "count hidden: {text:?}");
     }
 }

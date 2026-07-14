@@ -1185,7 +1185,6 @@ impl App {
             ),
             sidebar_spaces: self.state.sidebar_spaces.clone(),
             sidebar_agents: self.state.sidebar_agents.clone(),
-            sidebar_host: self.state.sidebar_host.clone(),
         }
     }
 }
