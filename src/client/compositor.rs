@@ -5046,6 +5046,23 @@ mod tests {
     }
 
     #[test]
+    fn working_agent_status_projects_working_terminal_state() {
+        let (model, _remote_id) = model_with_agent_status("working");
+        let compositor = ClientCompositor::new(26);
+        let snapshot =
+            ClientSidebarSnapshot::from_model(&model, &compositor, 26, 60, 16, Instant::now());
+
+        assert!(
+            snapshot
+                .app
+                .terminals
+                .values()
+                .any(|terminal| terminal.state == AgentState::Working),
+            "a working remote agent should project a Working placeholder terminal"
+        );
+    }
+
+    #[test]
     fn sidebar_wants_animation_false_when_all_idle() {
         // Idle agents never request animation (host banners no longer animate at all).
         for status in ["idle", "done", "blocked", "unknown"] {
