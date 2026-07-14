@@ -2232,6 +2232,14 @@ enum ClientLoopEvent {
         result: Result<supervisor::ServerSummary, supervisor::ConnectionState>,
         elapsed: Duration,
     },
+    /// The MAIN server's registry/settings/summary bundle completed off the UI
+    /// loop. Fetched asynchronously because the main api socket is an ssh
+    /// bridge under `herdr --remote`, where each request is a WAN round-trip.
+    #[cfg(unix)]
+    MainSupervisorRefreshFinished {
+        snapshot: Box<supervisor::MainSupervisorSnapshot>,
+        elapsed: Duration,
+    },
     /// A sidebar-summary subscription worker ended and should be eligible to restart.
     #[cfg(unix)]
     SupervisorSummarySubscriptionEnded(supervisor::ServerId),
@@ -3622,22 +3630,41 @@ fn add_remote_target_status_error_is_transient(error: &str) -> bool {
         || error.contains("no such file or directory")
 }
 
-/// item 6 (Area 6): the LOCAL main/registry/ui-settings refresh (local socket, no SSH RTT). This
-/// is the `refresh_client_supervisor_summaries` body MINUS the secondary fan-out. The Timer's 2s
-/// gate calls this directly so the per-secondary `due_secondary_summary_refreshes` loop is the
-/// single source of secondary cadence (the fan-out would duplicate it).
+/// The main/registry/ui-settings refresh, fetched OFF the UI loop over one api
+/// connection and posted back as [`ClientLoopEvent::MainSupervisorRefreshFinished`].
+///
+/// This must never run synchronously on the UI loop: the main api socket is
+/// only a fast local socket for a locally-attached client. Under
+/// `herdr --remote <host>` it is an ssh bridge, where every request is a fresh
+/// bridge exec plus a WAN round-trip — a synchronous fetch froze input and
+/// frame rendering for the whole bundle (the "super slow" remote attach).
+///
+/// Deduped through the SAME pending/queued sets the secondary refreshes use,
+/// keyed by `ServerId::main()`: a change signal that lands while a fetch is in
+/// flight queues exactly one rerun instead of stacking threads.
 #[cfg(unix)]
-fn refresh_main_local_summaries(model: &mut supervisor::ClientSupervisorModel) {
-    let mut api = crate::api::client::ApiClient::local();
-    if let Err(err) = model.refresh_remote_registry_from_api(&mut api) {
-        warn!(err = %err, "failed to refresh main server remote registry");
+fn start_main_supervisor_refresh(
+    pending: &mut HashSet<supervisor::ServerId>,
+    queued: &mut HashSet<supervisor::ServerId>,
+    event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
+) {
+    let main_id = supervisor::ServerId::main();
+    if pending.contains(&main_id) {
+        queued.insert(main_id);
+        return;
     }
-    if let Err(err) = model.refresh_main_ui_settings_from_api(&mut api) {
-        warn!(err = %err, "failed to refresh main server UI settings");
-    }
-    if let Err(err) = model.refresh_main_summary_from_api(&mut api) {
-        warn!(err = %err, "failed to refresh main server summary");
-    }
+    pending.insert(main_id);
+    let event_tx = event_tx.clone();
+    std::thread::spawn(move || {
+        let started_at = Instant::now();
+        let mut api = crate::api::client::ApiClient::local();
+        let snapshot = supervisor::fetch_main_supervisor_snapshot(&mut api);
+        let elapsed = started_at.elapsed();
+        let _ = event_tx.blocking_send(ClientLoopEvent::MainSupervisorRefreshFinished {
+            snapshot: Box::new(snapshot),
+            elapsed,
+        });
+    });
 }
 
 #[cfg(unix)]
@@ -3645,9 +3672,14 @@ fn refresh_client_supervisor_summaries(
     model: &mut supervisor::ClientSupervisorModel,
     ssh_bridges: &HashMap<supervisor::ServerId, crate::remote::RemoteBridge>,
     pending_summary_refresh_server_ids: &mut HashSet<supervisor::ServerId>,
+    queued_summary_refresh_server_ids: &mut HashSet<supervisor::ServerId>,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) {
-    refresh_main_local_summaries(model);
+    start_main_supervisor_refresh(
+        pending_summary_refresh_server_ids,
+        queued_summary_refresh_server_ids,
+        event_tx,
+    );
     let immediate_results = start_secondary_supervisor_summary_refreshes(
         model,
         ssh_bridges,
@@ -3711,8 +3743,8 @@ fn start_single_secondary_summary_refresh(
     queued: &mut HashSet<supervisor::ServerId>,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) {
-    // Main-server id: no SSH fetch. The caller performs the local `&mut`
-    // `refresh_main_summary_from_api`.
+    // Main-server id: not an SSH-bridged secondary — the caller routes main
+    // through `start_main_supervisor_refresh` instead.
     if *server_id == supervisor::ServerId::main() {
         return;
     }
@@ -3859,6 +3891,7 @@ fn apply_remote_manage_request_finished(
                     model,
                     &state.ssh_bridges,
                     &mut state.pending_summary_refresh_server_ids,
+                    &mut state.queued_summary_refresh_server_ids,
                     event_tx,
                 );
                 // re-enable MUST explicitly yield `Connecting` so the now-ungated
@@ -3875,6 +3908,7 @@ fn apply_remote_manage_request_finished(
                     model,
                     &state.ssh_bridges,
                     &mut state.pending_summary_refresh_server_ids,
+                    &mut state.queued_summary_refresh_server_ids,
                     event_tx,
                 );
             }
@@ -3893,6 +3927,7 @@ fn apply_remote_manage_request_finished(
                     model,
                     &state.ssh_bridges,
                     &mut state.pending_summary_refresh_server_ids,
+                    &mut state.queued_summary_refresh_server_ids,
                     event_tx,
                 );
                 model.clear_remote_manage_pending(remote_id);
@@ -5017,16 +5052,17 @@ async fn run_client_loop(
                     "supervisor summary event requested refresh"
                 );
                 // item 6 (Area 6): targeted event-push — refresh ONLY the changed server, not the
-                // whole fleet. A main id refreshes locally (`&mut`); a secondary id spawns a single
-                // off-loop fetch (the helper is a no-op on a main id).
+                // whole fleet. Both main and secondary ids spawn a single off-loop fetch; the
+                // repaint happens when the fetched result arrives (no data changed yet here, and
+                // the main fetch is a WAN round-trip bundle under `herdr --remote`).
                 let now = Instant::now();
-                if let Some(model) = &mut state.supervisor_model {
+                if let Some(model) = &state.supervisor_model {
                     if server_id == supervisor::ServerId::main() {
-                        if let Err(err) = model.refresh_main_summary_from_api(
-                            &mut crate::api::client::ApiClient::local(),
-                        ) {
-                            warn!(err = %err, "failed to refresh changed main summary");
-                        }
+                        start_main_supervisor_refresh(
+                            &mut state.pending_summary_refresh_server_ids,
+                            &mut state.queued_summary_refresh_server_ids,
+                            &event_tx,
+                        );
                     } else {
                         start_single_secondary_summary_refresh(
                             model,
@@ -5038,7 +5074,6 @@ async fn run_client_loop(
                         );
                     }
                     state.last_summary_refresh.insert(server_id.clone(), now);
-                    state.request_full_redraw();
                 }
                 schedule_missing_secondary_stream_retries(
                     &mut state,
@@ -5054,7 +5089,6 @@ async fn run_client_loop(
                         &should_quit,
                     );
                 }
-                render_cached_composited_frame(&mut state);
             }
             #[cfg(unix)]
             ClientLoopEvent::SupervisorSummaryFetched {
@@ -5095,6 +5129,47 @@ async fn run_client_loop(
                 if let Some(model) = &mut state.supervisor_model {
                     model.apply_secondary_summary_results([(server_id.clone(), result)]);
                     state.request_full_redraw();
+                }
+                schedule_missing_secondary_stream_retries(
+                    &mut state,
+                    &server_writes,
+                    Instant::now(),
+                );
+                if let Some(model) = &state.supervisor_model {
+                    start_missing_supervisor_summary_subscriptions(
+                        model,
+                        &mut state.summary_subscription_server_ids,
+                        &state.ssh_bridges,
+                        &event_tx,
+                        &should_quit,
+                    );
+                }
+                render_cached_composited_frame(&mut state);
+            }
+            #[cfg(unix)]
+            ClientLoopEvent::MainSupervisorRefreshFinished { snapshot, elapsed } => {
+                let main_id = supervisor::ServerId::main();
+                state.pending_summary_refresh_server_ids.remove(&main_id);
+                // A change signal arrived while this fetch was in flight: the fetch may have
+                // read pre-change state, so rerun immediately (same coalescing the secondary
+                // path uses — at most one fetch in flight plus one queued rerun).
+                if state.queued_summary_refresh_server_ids.remove(&main_id) {
+                    start_main_supervisor_refresh(
+                        &mut state.pending_summary_refresh_server_ids,
+                        &mut state.queued_summary_refresh_server_ids,
+                        &event_tx,
+                    );
+                }
+                state.last_summary_refresh.insert(main_id, Instant::now());
+                if elapsed > CLIENT_60FPS_FRAME_BUDGET {
+                    debug!(
+                        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+                        frame_budget_fps = fps_for_frame_duration(CLIENT_60FPS_FRAME_BUDGET),
+                        "main supervisor refresh completed off UI thread"
+                    );
+                }
+                if let Some(model) = &mut state.supervisor_model {
+                    model.apply_main_supervisor_snapshot(*snapshot);
                 }
                 schedule_missing_secondary_stream_retries(
                     &mut state,
@@ -5156,6 +5231,7 @@ async fn run_client_loop(
                                     model,
                                     &state.ssh_bridges,
                                     &mut state.pending_summary_refresh_server_ids,
+                                    &mut state.queued_summary_refresh_server_ids,
                                     &event_tx,
                                 );
                                 state.last_supervisor_summary_refresh = now;
@@ -5177,16 +5253,17 @@ async fn run_client_loop(
                             }
                         } else if refresh == ClientApiRefreshPolicy::ImmediateFocused {
                             // item 6 (Area 6): targeted single-server fetch for the focused server
-                            // ONLY (not the whole fleet). A focused main workspace produces
-                            // server_id == main, so the local `&mut` refresh path is reachable.
+                            // ONLY (not the whole fleet). Both main and secondary fetch OFF the UI
+                            // loop — a focused main workspace produces server_id == main, and under
+                            // `herdr --remote` the main api socket is an ssh bridge (WAN RTTs).
                             let now = Instant::now();
-                            if let Some(model) = &mut state.supervisor_model {
+                            if let Some(model) = &state.supervisor_model {
                                 if server_id == supervisor::ServerId::main() {
-                                    if let Err(err) = model.refresh_main_summary_from_api(
-                                        &mut crate::api::client::ApiClient::local(),
-                                    ) {
-                                        warn!(err = %err, "failed to refresh focused main summary");
-                                    }
+                                    start_main_supervisor_refresh(
+                                        &mut state.pending_summary_refresh_server_ids,
+                                        &mut state.queued_summary_refresh_server_ids,
+                                        &event_tx,
+                                    );
                                 } else {
                                     start_single_secondary_summary_refresh(
                                         model,
@@ -5299,6 +5376,7 @@ async fn run_client_loop(
                                 model,
                                 &state.ssh_bridges,
                                 &mut state.pending_summary_refresh_server_ids,
+                                &mut state.queued_summary_refresh_server_ids,
                                 &event_tx,
                             );
                             start_missing_supervisor_summary_subscriptions(
@@ -5394,6 +5472,7 @@ async fn run_client_loop(
                                         model,
                                         &state.ssh_bridges,
                                         &mut state.pending_summary_refresh_server_ids,
+                                        &mut state.queued_summary_refresh_server_ids,
                                         &event_tx,
                                     );
                                     start_missing_supervisor_summary_subscriptions(
@@ -5540,11 +5619,17 @@ async fn run_client_loop(
 
                     let mut did_local_refresh = false;
                     if supervisor_summary_refresh_due(now, state.last_supervisor_summary_refresh) {
-                        // The 2s gate drives ONLY the local main/registry/ui-settings refresh
-                        // (local socket, no SSH RTT). The secondary fan-out is OMITTED — the per-
-                        // secondary `due` loop above is the single source of secondary cadence.
-                        if let Some(model) = &mut state.supervisor_model {
-                            refresh_main_local_summaries(model);
+                        // The 2s gate drives ONLY the main registry/ui-settings/summary refresh,
+                        // fetched OFF the UI loop (under `herdr --remote` the main api socket is
+                        // an ssh bridge, so this bundle is WAN round-trips). The secondary fan-out
+                        // is OMITTED — the per-secondary `due` loop above is the single source of
+                        // secondary cadence.
+                        if state.supervisor_model.is_some() {
+                            start_main_supervisor_refresh(
+                                &mut state.pending_summary_refresh_server_ids,
+                                &mut state.queued_summary_refresh_server_ids,
+                                &event_tx,
+                            );
                             state.last_supervisor_summary_refresh = now;
                             state.request_full_redraw();
                         }
@@ -8555,6 +8640,24 @@ mod tests {
             assert!(pending.contains(&remote_id));
             assert!(queued.contains(&remote_id));
             assert!(event_rx.try_recv().is_err());
+        }
+
+        #[test]
+        fn main_supervisor_refresh_dedupes_pending_and_queues_rerun() {
+            // A change signal that lands while a main fetch is already in flight must
+            // queue exactly one rerun instead of spawning a second fetch thread —
+            // under `herdr --remote` each main fetch is a WAN round-trip bundle.
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+            let mut pending = HashSet::new();
+            let mut queued = HashSet::new();
+            pending.insert(supervisor::ServerId::main());
+
+            start_main_supervisor_refresh(&mut pending, &mut queued, &event_tx);
+
+            assert_eq!(pending.len(), 1);
+            assert!(pending.contains(&supervisor::ServerId::main()));
+            assert!(queued.contains(&supervisor::ServerId::main()));
+            assert!(event_rx.try_recv().is_err(), "no second fetch spawned");
         }
 
         #[test]

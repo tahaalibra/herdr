@@ -555,24 +555,6 @@ impl ClientSupervisorModel {
         self.ui_settings = ui_settings;
     }
 
-    pub(crate) fn refresh_main_ui_settings_from_api(
-        &mut self,
-        api: &mut impl SupervisorApi,
-    ) -> Result<(), String> {
-        let ui_settings = request_ui_settings(api)?;
-        self.set_ui_settings(ui_settings);
-        Ok(())
-    }
-
-    pub(crate) fn refresh_remote_registry_from_api(
-        &mut self,
-        api: &mut impl SupervisorApi,
-    ) -> Result<(), String> {
-        let remotes = request_remote_list(api)?;
-        self.sync_remote_registry(remotes);
-        Ok(())
-    }
-
     pub(crate) fn activate_main_server(&mut self) {
         self.close_new_workspace_picker();
         self.active_server_id = ServerId::main();
@@ -886,13 +868,29 @@ impl ClientSupervisorModel {
         }
     }
 
-    pub(crate) fn refresh_main_summary_from_api(
-        &mut self,
-        api: &mut impl SupervisorApi,
-    ) -> Result<(), String> {
-        let summary = request_server_summary(api)?;
-        self.set_summary(&ServerId::main(), summary)
-            .map_err(|()| "main server is missing from supervisor model".to_string())
+    /// Apply an asynchronously fetched main-server bundle. Each part applies
+    /// independently, so one failed request never discards the others; a failed
+    /// summary keeps the previous rows (matching the secondary refresh behavior
+    /// of never blanking the sidebar on a transient error).
+    pub(crate) fn apply_main_supervisor_snapshot(&mut self, snapshot: MainSupervisorSnapshot) {
+        match snapshot.remotes {
+            Ok(remotes) => self.sync_remote_registry(remotes),
+            Err(err) => {
+                tracing::warn!(err = %err, "failed to refresh main server remote registry")
+            }
+        }
+        match snapshot.ui_settings {
+            Ok(settings) => self.set_ui_settings(settings),
+            Err(err) => tracing::warn!(err = %err, "failed to refresh main server UI settings"),
+        }
+        match snapshot.summary {
+            Ok(summary) => {
+                if self.set_summary(&ServerId::main(), summary).is_err() {
+                    tracing::warn!("main server is missing from supervisor model");
+                }
+            }
+            Err(err) => tracing::warn!(err = %err, "failed to refresh main server summary"),
+        }
     }
 
     pub(crate) fn new_workspace_route(&self) -> NewWorkspaceRoute {
@@ -2505,6 +2503,31 @@ fn request_server_summary(api: &mut impl SupervisorApi) -> Result<ServerSummary,
     Ok(ServerSummary::from_api(workspaces, agents))
 }
 
+/// One fetched round of the MAIN server's supervisor state: the remote registry,
+/// ui settings, and workspace/agent summary, gathered over a single api
+/// connection OFF the client UI loop. When the main server is a
+/// `herdr --remote` attach, its "local" api socket is an ssh bridge and every
+/// request is a WAN round-trip — fetching this bundle synchronously on the UI
+/// loop froze input and rendering for the whole round-trip sequence.
+#[derive(Debug)]
+pub(crate) struct MainSupervisorSnapshot {
+    pub(crate) remotes: Result<Vec<crate::remote_registry::RemoteDefinitionSnapshot>, String>,
+    pub(crate) ui_settings: Result<crate::api::schema::UiSettingsInfo, String>,
+    pub(crate) summary: Result<ServerSummary, String>,
+}
+
+/// Fetch the main-server supervisor bundle over one api connection. Each part
+/// carries its own result so one failed request does not discard the others.
+pub(crate) fn fetch_main_supervisor_snapshot(
+    api: &mut impl SupervisorApi,
+) -> MainSupervisorSnapshot {
+    MainSupervisorSnapshot {
+        remotes: request_remote_list(api),
+        ui_settings: request_ui_settings(api),
+        summary: request_server_summary(api),
+    }
+}
+
 pub(crate) fn fetch_server_summary_from_api_target(
     target: crate::api::client::ConnectionTarget,
 ) -> Result<ServerSummary, ConnectionState> {
@@ -3203,7 +3226,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_main_summary_from_api_replaces_main_summary_only() {
+    fn fetched_main_snapshot_replaces_main_summary_only() {
         let mut model = ClientSupervisorModel::new("local");
         let remote_id = model.add_secondary(ssh_remote("remote-x", "x", "x"));
         model
@@ -3222,6 +3245,7 @@ mod tests {
             )
             .unwrap();
         let mut api = FakeSupervisorApi {
+            remotes: vec![ssh_remote("remote-x", "x", "x")],
             workspaces: vec![workspace_info("main-updated", "herdr", true)],
             agents: vec![agent_info(
                 "main-agent",
@@ -3233,9 +3257,18 @@ mod tests {
             ..FakeSupervisorApi::default()
         };
 
-        model.refresh_main_summary_from_api(&mut api).unwrap();
+        let snapshot = fetch_main_supervisor_snapshot(&mut api);
+        assert_eq!(
+            api.requests,
+            vec![
+                "remote.list",
+                "server.ui_settings",
+                "workspace.list",
+                "agent.list"
+            ]
+        );
+        model.apply_main_supervisor_snapshot(snapshot);
 
-        assert_eq!(api.requests, vec!["workspace.list", "agent.list"]);
         assert_eq!(
             model.workspace_rows(),
             vec![
@@ -3263,6 +3296,43 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn apply_main_snapshot_applies_parts_independently() {
+        // One failed request must not discard the other parts, and a failed
+        // summary keeps the previous rows instead of blanking the sidebar.
+        let mut model = ClientSupervisorModel::new("local");
+        model
+            .set_summary(
+                &ServerId::main(),
+                ServerSummary {
+                    workspaces: vec![WorkspaceSummary {
+                        workspace_id: "kept".into(),
+                        label: "kept".into(),
+                        focused: true,
+                        ..Default::default()
+                    }],
+                    agents: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        model.apply_main_supervisor_snapshot(MainSupervisorSnapshot {
+            remotes: Ok(vec![ssh_remote("remote-new", "new", "new.example.com")]),
+            ui_settings: Err("settings unavailable".into()),
+            summary: Err("bridge dropped".into()),
+        });
+
+        // Registry synced despite the other failures…
+        assert!(model
+            .server_for_test(&ServerId::secondary("remote-new"))
+            .is_some());
+        // …and the previous main summary rows survive the failed summary fetch.
+        assert!(model
+            .workspace_rows()
+            .iter()
+            .any(|row| row.workspace_id.as_deref() == Some("kept")));
     }
 
     #[test]
