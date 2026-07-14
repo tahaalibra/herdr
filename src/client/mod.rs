@@ -512,7 +512,9 @@ fn dispatch_composited_input(
     // the SAME client action the mouse path uses. Only a single bare Key event is considered; any
     // multi-event/paste/unmatched input falls through to Forward so terminal input is preserved.
     if let [crate::raw_input::RawInputEvent::Key(key)] = events.as_slice() {
-        if let Some(dispatch) = dispatch_composited_key_input(*key, &data, compositor, model) {
+        if let Some(dispatch) =
+            dispatch_composited_key_input(*key, &data, compositor, model, host_size)
+        {
             return dispatch;
         }
     }
@@ -546,6 +548,7 @@ fn dispatch_composited_key_input(
     raw_bytes: &[u8],
     compositor: &mut compositor::ClientCompositor,
     model: &mut supervisor::ClientSupervisorModel,
+    host_size: (u16, u16),
 ) -> Option<ClientInputDispatch> {
     let (keybinds, prefix) = client_navigation_keybinds();
 
@@ -559,9 +562,14 @@ fn dispatch_composited_key_input(
             compositor.disarm_prefix();
             return Some(ClientInputDispatch::Redraw);
         }
-        if let Some(dispatch) =
-            sidebar_action_dispatch(&keybinds, key, compositor, model, ActionTrigger::Prefix)
-        {
+        if let Some(dispatch) = sidebar_action_dispatch(
+            &keybinds,
+            key,
+            compositor,
+            model,
+            ActionTrigger::Prefix,
+            host_size,
+        ) {
             compositor.disarm_prefix();
             return Some(dispatch);
         }
@@ -581,7 +589,14 @@ fn dispatch_composited_key_input(
         return Some(ClientInputDispatch::Redraw);
     }
 
-    sidebar_action_dispatch(&keybinds, key, compositor, model, ActionTrigger::Direct)
+    sidebar_action_dispatch(
+        &keybinds,
+        key,
+        compositor,
+        model,
+        ActionTrigger::Direct,
+        host_size,
+    )
 }
 
 /// #24: whether to match the configured prefix-mode side of a binding (`prefix+x`, only checked
@@ -617,6 +632,7 @@ fn sidebar_action_dispatch(
     compositor: &mut compositor::ClientCompositor,
     model: &mut supervisor::ClientSupervisorModel,
     trigger: ActionTrigger,
+    host_size: (u16, u16),
 ) -> Option<ClientInputDispatch> {
     let matches = |binding: &crate::config::ActionKeybinds| match trigger {
         ActionTrigger::Direct => binding.matches_direct_key(key),
@@ -658,11 +674,14 @@ fn sidebar_action_dispatch(
         ));
     }
 
-    // toggle sidebar collapse (#25): client-local compositor flip, no server round-trip —
-    // the SAME method the mouse toggle calls.
+    // toggle sidebar collapse (#25): flip the client-local compositor flag, then resize —
+    // collapsing reclaims the sidebar columns for the content, so every connected server
+    // must re-render at the new content width (the SAME dispatch the mouse toggle and the
+    // width-divider drag use).
     if matches(&keybinds.toggle_sidebar) {
         compositor.toggle_sidebar_collapsed();
-        return Some(ClientInputDispatch::Redraw);
+        let (cols, rows) = compositor.content_size(host_size.0, host_size.1);
+        return Some(ClientInputDispatch::Resize { cols, rows });
     }
 
     None
@@ -1212,12 +1231,15 @@ fn dispatch_composited_mouse_input(
                 ClientInputDispatch::Consumed
             };
         }
-        // #25: the collapse/expand toggle mutates client-local compositor state (no server round-
-        // trip), so it is handled here where `&mut compositor` is in scope (like the sort toggle).
+        // #25: the collapse/expand toggle mutates client-local compositor state, handled here
+        // where `&mut compositor` is in scope (like the sort toggle). Collapsing reclaims the
+        // sidebar columns for the content, so the flip dispatches a Resize — every connected
+        // server re-renders at the new content width (same path as the width-divider drag).
         if matches!(target, compositor::SidebarHitTarget::CollapsedSidebarToggle) {
             return if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 compositor.toggle_sidebar_collapsed();
-                ClientInputDispatch::Redraw
+                let (cols, rows) = compositor.content_size(host_size.0, host_size.1);
+                ClientInputDispatch::Resize { cols, rows }
             } else {
                 ClientInputDispatch::Consumed
             };
@@ -2653,10 +2675,12 @@ fn run_client_with_mode(
         #[cfg(unix)]
         compositor: use_client_compositor.then(|| {
             let mut compositor = compositor::ClientCompositor::default();
-            // The composited sidebar renders client-side: resolve the theme from
-            // the CLIENT's local config so it matches the server-rendered look.
+            // The composited sidebar renders client-side: resolve the theme and the
+            // collapsed-sidebar mode from the CLIENT's local config so it matches
+            // the server-rendered look and collapse behavior.
             if let Ok(loaded) = crate::config::load_live_config() {
                 compositor.set_palette(crate::app::client_palette_from_config(&loaded.config));
+                compositor.set_collapsed_mode(loaded.config.ui.sidebar_collapsed_mode);
             }
             compositor
         }),
@@ -8258,8 +8282,9 @@ mod tests {
             });
         }
 
-        // A collapse-toggle key flips `from_model`'s `app.sidebar_collapsed` — a client-local
-        // compositor flip (Redraw, no server traffic).
+        // A collapse-toggle key flips `from_model`'s `app.sidebar_collapsed` AND dispatches a
+        // Resize at the reclaimed content width — the collapsed rail is narrow (COLLAPSED_WIDTH),
+        // so every connected server must re-render at the wider content.
         #[test]
         fn collapse_toggle_key_flips_sidebar_collapsed() {
             with_client_keys_config("[keys]\ntoggle_sidebar = \"alt+b\"\n", || {
@@ -8273,8 +8298,24 @@ mod tests {
                     &mut model,
                     (60, 16),
                 );
-                assert_eq!(dispatch, ClientInputDispatch::Redraw);
+                assert_eq!(
+                    dispatch,
+                    ClientInputDispatch::Resize {
+                        cols: 60 - crate::ui::COLLAPSED_WIDTH,
+                        rows: 16
+                    }
+                );
                 assert!(compositor.sidebar_collapsed_for_test());
+
+                // Toggling back expands to the configured width and resizes again.
+                let dispatch = dispatch_composited_input(
+                    b"\x1bb".to_vec(),
+                    &mut compositor,
+                    &mut model,
+                    (60, 16),
+                );
+                assert_eq!(dispatch, ClientInputDispatch::Resize { cols: 34, rows: 16 });
+                assert!(!compositor.sidebar_collapsed_for_test());
             });
         }
 

@@ -179,6 +179,12 @@ pub(crate) struct ClientCompositor {
     // view preference fed into `from_model` (sets `app.sidebar_collapsed`) so the SHARED renderer
     // branches to the narrow collapsed layout and `hit_test` reads the collapsed geometry.
     sidebar_collapsed: bool,
+    // #25: how a collapsed sidebar reclaims width, mirroring the server's
+    // `ui.sidebar_collapsed_mode` config (`compact` keeps the narrow glance rail,
+    // `hidden` drops the sidebar to zero width). Read from the client's local
+    // config at construction so the composited client collapses exactly like the
+    // server-rendered sidebar does.
+    collapsed_mode: crate::config::SidebarCollapsedModeConfig,
     // #24: client-local prefix-mode flag. Mirrors the server's `Mode::Prefix` state machine so the
     // configured prefix key (a modified chord, e.g. `ctrl+b`) arms interception of the very next
     // key for prefix-bound sidebar-nav actions. Bare keys are never intercepted unless armed, so
@@ -319,6 +325,7 @@ impl ClientCompositor {
             hover: None,
             agent_panel_sort: crate::app::state::AgentPanelSort::default(),
             sidebar_collapsed: false,
+            collapsed_mode: crate::config::SidebarCollapsedModeConfig::default(),
             pending_prefix_bytes: None,
             collapsed_space_keys: std::collections::HashSet::new(),
         }
@@ -332,6 +339,13 @@ impl ClientCompositor {
     /// reload). The next `from_model` snapshot renders with it.
     pub(crate) fn set_palette(&mut self, palette: crate::app::state::Palette) {
         self.palette = palette;
+    }
+
+    /// #25: apply the client's locally-configured collapsed-sidebar mode
+    /// (`ui.sidebar_collapsed_mode`), so collapsing reclaims width exactly like
+    /// the server-rendered sidebar (compact rail vs fully hidden).
+    pub(crate) fn set_collapsed_mode(&mut self, mode: crate::config::SidebarCollapsedModeConfig) {
+        self.collapsed_mode = mode;
     }
 
     /// #24: whether the prefix key has been pressed and the next key should be matched against
@@ -444,6 +458,11 @@ impl ClientCompositor {
     ) -> Option<SidebarResizeOutcome> {
         use crossterm::event::{MouseButton, MouseEventKind};
 
+        // #25: the collapsed rail has no width divider — its last column is
+        // glance content, not a drag affordance (matches the server).
+        if self.sidebar_collapsed {
+            return None;
+        }
         let sidebar_width = self.effective_sidebar_width(host_width);
         let divider_col = sidebar_width.checked_sub(1)?;
         match mouse.kind {
@@ -1120,6 +1139,17 @@ impl ClientCompositor {
         if host_width <= 1 {
             return 0;
         }
+        if self.sidebar_collapsed {
+            // #25: mirror the server's collapsed geometry (`compute_view_internal`):
+            // the compact rail keeps `COLLAPSED_WIDTH` columns for the glance
+            // layout; hidden reclaims the full width for the content.
+            return match self.collapsed_mode {
+                crate::config::SidebarCollapsedModeConfig::Compact => {
+                    crate::ui::COLLAPSED_WIDTH.min(host_width.saturating_sub(1))
+                }
+                crate::config::SidebarCollapsedModeConfig::Hidden => 0,
+            };
+        }
         self.sidebar_width.min(host_width.saturating_sub(1))
     }
 
@@ -1475,8 +1505,9 @@ impl ClientSidebarSnapshot {
         app.global_menu_extra_labels = vec!["add remote", "manage remotes"];
         // #25: gate the SHARED renderer onto its collapsed layout BEFORE geometry is computed, so
         // the collapsed sections + toggle rect are what gets laid out and what `hit_test` reads
-        // back. Collapsed keeps the normal sidebar width (the client path never narrows the column;
-        // width 0 still means "no sidebar", never collapsed).
+        // back. The caller passes the EFFECTIVE width (`effective_sidebar_width`), which is the
+        // narrow `COLLAPSED_WIDTH` rail (or 0 in hidden mode) while collapsed — the same geometry
+        // the server's `compute_view_internal` lays out.
         app.sidebar_collapsed = compositor.sidebar_collapsed;
         // #22: feed the client-local collapsed worktree-group keys into the SHARED grouping renderer
         // BEFORE geometry is computed, so `workspace_list_entries` collapses the right groups and the
@@ -5735,17 +5766,23 @@ mod tests {
     }
 
     // In COLLAPSED mode the toggle rect still hit-tests to the toggle; clicking it (mirrored by the
-    // mod.rs dispatch flipping the compositor flag) returns to expanded.
+    // mod.rs dispatch flipping the compositor flag) returns to expanded. The snapshot is built at
+    // the EFFECTIVE (narrow rail) width — the same geometry `hit_test` computes internally.
     #[test]
     fn collapsed_toggle_rect_hits_and_clicking_expands() {
         let (model, _local, _agent) = collapsed_model();
         let mut compositor = ClientCompositor::new(26);
         compositor.toggle_sidebar_collapsed();
         let host = (60u16, 28u16);
+        // #25: collapsing narrows the sidebar to the server's compact rail width.
+        assert_eq!(
+            compositor.effective_sidebar_width(host.0),
+            crate::ui::COLLAPSED_WIDTH
+        );
         let snap = ClientSidebarSnapshot::from_model(
             &model,
             &compositor,
-            26,
+            compositor.effective_sidebar_width(host.0),
             host.0,
             host.1,
             Instant::now(),
@@ -5758,8 +5795,10 @@ mod tests {
             Some(SidebarHitTarget::CollapsedSidebarToggle)
         );
 
-        // The mod.rs dispatch flips the compositor flag on this target.
+        // The mod.rs dispatch flips the compositor flag on this target; expanding
+        // restores the configured width.
         compositor.toggle_sidebar_collapsed();
+        assert_eq!(compositor.effective_sidebar_width(host.0), 26);
         let snap = ClientSidebarSnapshot::from_model(
             &model,
             &compositor,
@@ -5769,6 +5808,56 @@ mod tests {
             Instant::now(),
         );
         assert!(!snap.app.sidebar_collapsed);
+    }
+
+    // #25: the collapsed width mirrors the server's `ui.sidebar_collapsed_mode`: compact keeps the
+    // narrow glance rail, hidden reclaims the full width — and the content size grows to match, so
+    // the toggle's Resize dispatch tells every server to re-render at the wider content.
+    #[test]
+    fn collapsed_width_honors_collapsed_mode_and_grows_content() {
+        let host = (60u16, 28u16);
+        let mut compositor = ClientCompositor::new(26);
+        assert_eq!(compositor.content_size(host.0, host.1), (34, 28));
+
+        compositor.toggle_sidebar_collapsed();
+        assert_eq!(
+            compositor.effective_sidebar_width(host.0),
+            crate::ui::COLLAPSED_WIDTH
+        );
+        assert_eq!(
+            compositor.content_size(host.0, host.1),
+            (60 - crate::ui::COLLAPSED_WIDTH, 28)
+        );
+
+        compositor.set_collapsed_mode(crate::config::SidebarCollapsedModeConfig::Hidden);
+        assert_eq!(compositor.effective_sidebar_width(host.0), 0);
+        assert_eq!(compositor.content_size(host.0, host.1), (60, 28));
+
+        // Expanding restores the configured width in either mode.
+        compositor.toggle_sidebar_collapsed();
+        assert_eq!(compositor.effective_sidebar_width(host.0), 26);
+        assert_eq!(compositor.content_size(host.0, host.1), (34, 28));
+    }
+
+    // #25: the collapsed rail's last column is glance content, not a width divider — a press
+    // there must not arm a resize drag (the expanded divider still works).
+    #[test]
+    fn collapsed_rail_has_no_width_divider() {
+        let mut compositor = ClientCompositor::new(26);
+        compositor.toggle_sidebar_collapsed();
+        let host = (60u16, 28u16);
+        let settings = ClientSupervisorModel::new("local").ui_settings().clone();
+        let divider_col = compositor.effective_sidebar_width(host.0) - 1;
+        let press = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: divider_col,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert_eq!(
+            compositor.handle_sidebar_resize_mouse(&press, host.0, host.1, &settings),
+            None
+        );
     }
 
     // In COLLAPSED mode a workspace-glance row resolves to Workspace for the owning server, and that
